@@ -11,8 +11,8 @@ st.set_page_config(page_title="Gestão de Custos & Budget", layout="wide")
 
 # --- 2. CONFIGURAÇÕES NA BARRA LATERAL ---
 st.sidebar.header("⚙️ Configurações de Conexão")
-spreadsheet_url = st.sidebar.text_input("URL da Planilha Google")
-drive_folder_id = st.sidebar.text_input("ID da Pasta no Drive (para as NFs)")
+spreadsheet_url = st.sidebar.text_input("1sfVgLYOjM5pJDGl9ML6FN22g1sKaj7Om1x4g1O9ITPI")
+drive_folder_id = st.sidebar.text_input("11h3UccF6JH_8SQOUL_HhJZ9beIUQB4kp (para as NFs)")
 
 # O arquivo JSON deve estar no diretório raiz ou configurado nos Secrets do Streamlit
 # Para deploy, usaremos o nome padrão buscado pelo PyDrive2
