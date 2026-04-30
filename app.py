@@ -188,5 +188,7 @@ else:
                         use_container_width=True,
                         hide_index=True
                     )
-        except Exception as e:
-            st.error(f"Erro ao carregar o dashboard: {e}")
+except Exception as e:
+            import traceback
+            st.error("Erro ao carregar o dashboard. Veja o detalhe técnico abaixo:")
+            st.code(traceback.format_exc())
