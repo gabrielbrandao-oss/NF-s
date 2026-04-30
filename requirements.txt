@@ -1,2 +1,4 @@
 pandas
 st-gsheets-connection
+PyDrive2
+oauth2client
