@@ -124,71 +124,7 @@ else:
             else:
                 st.error("Preencha Nº NF e Conta SAP.")
 
-    # --- TAB 2: CONFRONTO BUDGET MENSAL ---
-    with tab2:
-        st.subheader("Análise Mensal: Orçamento vs. Realizado")
-        
-        try:
-            client = get_google_client()
-            sheet = client.open_by_url(spreadsheet_url)
-            
-            df_lanc = pd.DataFrame(sheet.worksheet("Lancamentos").get_all_records())
-            df_budget = pd.DataFrame(sheet.worksheet("Budget").get_all_records())
-
-            if df_budget.empty or df_lanc.empty:
-                st.info("Aguardando lançamentos e dados de budget para gerar o gráfico.")
-            else:
-                df_budget["Valor Budget"] = df_budget["BUDGET"].apply(limpar_moeda).fillna(0)
-                df_lanc["Valor Realizado"] = df_lanc["Total documento"].apply(limpar_moeda).fillna(0)
-
-                df_budget["Competência"] = pd.to_datetime(df_budget["MÊS"], format='%d/%m/%Y', errors='coerce').dt.strftime('%m/%Y')
-                df_lanc["Competência"] = pd.to_datetime(df_lanc["Data de lançamento"], format='%d/%m/%Y', errors='coerce').dt.strftime('%m/%Y')
-
-                meses_disponiveis = sorted(df_budget["Competência"].dropna().unique().tolist())
-                
-                if not meses_disponiveis:
-                    st.warning("Verifique o formato das datas na aba Budget (deve ser DD/MM/AAAA).")
-                else:
-                    mes_selecionado = st.selectbox("Selecione a Competência (Mês/Ano):", meses_disponiveis)
-
-                    budget_mes = df_budget[df_budget["Competência"] == mes_selecionado].copy()
-                    lanc_mes = df_lanc[df_lanc["Competência"] == mes_selecionado].copy()
-
-                    if "Conta SAP" not in lanc_mes.columns:
-                        lanc_mes["Conta SAP"] = ""
-                        
-                    gastos_agrupados = lanc_mes.groupby("Conta SAP")["Valor Realizado"].sum().reset_index()
-                    gastos_agrupados.rename(columns={"Conta SAP": "CONTA", "Valor Realizado": "Realizado"}, inplace=True)
-
-                    budget_mes["CONTA"] = budget_mes["CONTA"].astype(str).str.strip()
-                    gastos_agrupados["CONTA"] = gastos_agrupados["CONTA"].astype(str).str.strip()
-
-                    df_comparativo = pd.merge(budget_mes, gastos_agrupados, on="CONTA", how="left").fillna(0)
-                    df_comparativo["Saldo Restante"] = df_comparativo["Valor Budget"] - df_comparativo["Realizado"]
-                    
-                    df_exibicao = df_comparativo[["CONTA", "TIPO 1", "Valor Budget", "Realizado", "Saldo Restante"]]
-
-                    m1, m2, m3 = st.columns(3)
-                    m1.metric("Budget do Mês", f"R$ {df_exibicao['Valor Budget'].sum():,.2f}")
-                    m2.metric("Realizado do Mês", f"R$ {df_exibicao['Realizado'].sum():,.2f}")
-                    m3.metric("Saldo do Mês", f"R$ {df_exibicao['Saldo Restante'].sum():,.2f}")
-
-                    def pintar_estouro(row):
-                        if row["Saldo Restante"] < 0:
-                            return ['background-color: #ffe6e6; color: #990000'] * len(row)
-                        return [''] * len(row)
-
-                    st.write(f"### Detalhamento das Contas - {mes_selecionado}")
-                    st.dataframe(
-                        df_exibicao.style.apply(pintar_estouro, axis=1).format({
-                            "Valor Budget": "R$ {:,.2f}",
-                            "Realizado": "R$ {:,.2f}",
-                            "Saldo Restante": "R$ {:,.2f}"
-                        }),
-                        use_container_width=True,
-                        hide_index=True
-                    )
-except Exception as e:
-            import traceback
-            st.error("Erro ao carregar o dashboard. Veja o detalhe técnico abaixo:")
-            st.code(traceback.format_exc())
+    File "/mount/src/nf-s/app.py", line 191
+  except Exception as e:
+  ^
+SyntaxError: expected 'except' or 'finally' block
