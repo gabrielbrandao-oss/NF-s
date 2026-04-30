@@ -11,7 +11,6 @@ st.set_page_config(page_title="App Controladoria", layout="wide")
 st.sidebar.header("⚙️ Configurações")
 spreadsheet_url = st.sidebar.text_input("1sfVgLYOjM5pJDGl9ML6FN22g1sKaj7Om1x4g1O9ITPI")
 drive_folder_id = st.sidebar.text_input("11h3UccF6JH_8SQOUL_HhJZ9beIUQB4kp (Opcional)")
-JSON_KEY_FILE = 'suas-credenciais.json'
 
 # --- ESCOPOS UNIFICADOS PARA DRIVE E SHEETS ---
 SCOPE = [
@@ -21,17 +20,27 @@ SCOPE = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-# --- CONEXÃO GERAL DO GOOGLE ---
+# --- NOVA FUNÇÃO DE AUTENTICAÇÃO (VIA SECRETS) ---
+def get_credentials():
+    """Lê as credenciais do cofre do Streamlit em vez de um arquivo físico"""
+    try:
+        # Transforma os segredos do Streamlit num dicionário Python
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        return ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
+    except KeyError:
+        st.error("⚠️ Credenciais não encontradas nos Secrets do Streamlit!")
+        st.stop()
+
 def get_google_client():
-    """Autentica com o JSON para o Gspread (Sheets)"""
-    creds = ServiceAccountCredentials.from_json_keyfile_name(JSON_KEY_FILE, SCOPE)
+    """Autentica com o Gspread (Sheets)"""
+    creds = get_credentials()
     return gspread.authorize(creds)
 
 def upload_to_drive(file, folder_id):
-    """Autentica com o JSON para o PyDrive2 (Drive)"""
+    """Autentica com o PyDrive2 (Drive)"""
     try:
         gauth = GoogleAuth()
-        gauth.credentials = ServiceAccountCredentials.from_json_keyfile_name(JSON_KEY_FILE, SCOPE)
+        gauth.credentials = get_credentials()
         drive = GoogleDrive(gauth)
         file_drive = drive.CreateFile({'title': file.name, 'parents': [{'id': folder_id}]})
         
@@ -48,7 +57,6 @@ def upload_to_drive(file, folder_id):
 
 # --- FUNÇÃO PARA LIMPAR VALORES MONETÁRIOS DO SHEETS ---
 def limpar_moeda(valor):
-    """Converte 'R$ 1.500,00' do Sheets para 1500.00 no Python"""
     if isinstance(valor, str):
         valor = valor.replace("R$", "").replace(".", "").replace(",", ".").strip()
     return pd.to_numeric(valor, errors='coerce')
@@ -81,39 +89,33 @@ else:
         if submit:
             if nf_num and conta_sap:
                 with st.spinner("Conectando ao Google e registrando nota..."):
-                    # 1. Enviar anexo para o Drive
                     link_nf = "Sem Anexo" 
                     if arquivo_nf and drive_folder_id:
                         link_nf = upload_to_drive(arquivo_nf, drive_folder_id) or "Erro no Link"
 
                     try:
-                        # 2. Conectar à Planilha
                         client = get_google_client()
                         sheet = client.open_by_url(spreadsheet_url)
                         worksheet = sheet.worksheet("Lancamentos")
                         
-                        # 3. Mapeamento Inteligente de Colunas
-                        cabecalhos = worksheet.row_values(1) # Lê os seus 37 cabeçalhos da linha 1
-                        nova_linha = [""] * len(cabecalhos) # Cria uma linha vazia
+                        cabecalhos = worksheet.row_values(1)
+                        nova_linha = [""] * len(cabecalhos)
                         
-                        # Onde colocar cada informação digitada:
                         dados_para_inserir = {
                             "Nº NF": nf_num,
                             "Nome do cliente/fornecedor": fornecedor,
                             "Data de lançamento": data_lanc.strftime("%d/%m/%Y"),
                             "Total documento": valor_bruto,
-                            "Total da linha": valor_bruto, # Repetindo para consistência
+                            "Total da linha": valor_bruto,
                             "Conta SAP": conta_sap,
                             "Referência da Nota Fiscal": link_nf
                         }
                         
-                        # Preenche a linha apenas nas colunas correspondentes
                         for col_nome, valor in dados_para_inserir.items():
                             if col_nome in cabecalhos:
                                 idx = cabecalhos.index(col_nome)
                                 nova_linha[idx] = valor
                                 
-                        # 4. Adicionar à Planilha
                         worksheet.append_row(nova_linha)
                         st.success(f"Nota {nf_num} salva na Conta {conta_sap} com sucesso!")
                         
@@ -127,26 +129,21 @@ else:
         st.subheader("Análise Mensal: Orçamento vs. Realizado")
         
         try:
-            # 1. Puxar os dados da nuvem via Gspread
             client = get_google_client()
             sheet = client.open_by_url(spreadsheet_url)
             
-            # get_all_records() ignora células vazias e pega as colunas corretamente
             df_lanc = pd.DataFrame(sheet.worksheet("Lancamentos").get_all_records())
             df_budget = pd.DataFrame(sheet.worksheet("Budget").get_all_records())
 
             if df_budget.empty or df_lanc.empty:
                 st.info("Aguardando lançamentos e dados de budget para gerar o gráfico.")
             else:
-                # 2. Limpar e padronizar os Dados Financeiros
                 df_budget["Valor Budget"] = df_budget["BUDGET"].apply(limpar_moeda).fillna(0)
                 df_lanc["Valor Realizado"] = df_lanc["Total documento"].apply(limpar_moeda).fillna(0)
 
-                # 3. Padronizar as Datas para o Filtro de Mês (MM/YYYY)
                 df_budget["Competência"] = pd.to_datetime(df_budget["MÊS"], format='%d/%m/%Y', errors='coerce').dt.strftime('%m/%Y')
                 df_lanc["Competência"] = pd.to_datetime(df_lanc["Data de lançamento"], format='%d/%m/%Y', errors='coerce').dt.strftime('%m/%Y')
 
-                # 4. Filtro na Tela
                 meses_disponiveis = sorted(df_budget["Competência"].dropna().unique().tolist())
                 
                 if not meses_disponiveis:
@@ -154,28 +151,23 @@ else:
                 else:
                     mes_selecionado = st.selectbox("Selecione a Competência (Mês/Ano):", meses_disponiveis)
 
-                    # Filtrar dados do mês
                     budget_mes = df_budget[df_budget["Competência"] == mes_selecionado].copy()
                     lanc_mes = df_lanc[df_lanc["Competência"] == mes_selecionado].copy()
 
-                    # 5. Agrupar Gastos por Conta SAP
                     if "Conta SAP" not in lanc_mes.columns:
-                        lanc_mes["Conta SAP"] = "" # Previne erro se a coluna vier vazia na primeira vez
+                        lanc_mes["Conta SAP"] = ""
                         
                     gastos_agrupados = lanc_mes.groupby("Conta SAP")["Valor Realizado"].sum().reset_index()
                     gastos_agrupados.rename(columns={"Conta SAP": "CONTA", "Valor Realizado": "Realizado"}, inplace=True)
 
-                    # Garantir formato de texto para cruzamento exato
                     budget_mes["CONTA"] = budget_mes["CONTA"].astype(str).str.strip()
                     gastos_agrupados["CONTA"] = gastos_agrupados["CONTA"].astype(str).str.strip()
 
-                    # 6. Cruzar Tabelas (PROCV)
                     df_comparativo = pd.merge(budget_mes, gastos_agrupados, on="CONTA", how="left").fillna(0)
                     df_comparativo["Saldo Restante"] = df_comparativo["Valor Budget"] - df_comparativo["Realizado"]
                     
                     df_exibicao = df_comparativo[["CONTA", "TIPO 1", "Valor Budget", "Realizado", "Saldo Restante"]]
 
-                    # --- EXIBIÇÃO DO DASHBOARD ---
                     m1, m2, m3 = st.columns(3)
                     m1.metric("Budget do Mês", f"R$ {df_exibicao['Valor Budget'].sum():,.2f}")
                     m2.metric("Realizado do Mês", f"R$ {df_exibicao['Realizado'].sum():,.2f}")
