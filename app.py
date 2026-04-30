@@ -12,7 +12,7 @@ st.set_page_config(page_title="Analista de Custos - Entrada de NF", layout="wide
 # --- BARRA LATERAL (CONFIGURAÇÕES DE ID) ---
 st.sidebar.header("⚙️ Configurações de Conexão")
 spreadsheet_id = st.sidebar.text_input("1sfVgLYOjM5pJDGl9ML6FN22g1sKaj7Om1x4g1O9ITPI", help="Aquele código longo na URL da planilha")
-drive_folder_id = st.sidebar.text_input("ID da Pasta no Drive", help="Código no final da URL da pasta onde as NFs ficarão")
+drive_folder_id = st.sidebar.text_input("11h3UccF6JH_8SQOUL_HhJZ9beIUQB4kp", help="Código no final da URL da pasta onde as NFs ficarão")
 json_auth = "suas-credenciais.json" # O arquivo que você baixou do Google Cloud
 
 # --- FUNÇÕES DE APOIO ---
