@@ -48,45 +48,39 @@ def upload_to_drive(file, folder_id):
         return file_drive['alternateLink']
     except Exception: return None
 
-# --- ENGINE DE DADOS (NORMALIZAÇÃO ABSOLUTA E INTELIGENTE BR/US) ---
+# --- ENGINE DE DADOS (NORMALIZAÇÃO ABSOLUTA) ---
 def limpeza_final(val):
+    """Pega o texto cru do Google Sheets e converte para float perfeitamente"""
     if pd.isna(val) or val == "": return 0.0
     if isinstance(val, (int, float)): return float(val)
     
-    # 1. Remove R$, espaços e caracteres invisíveis. Mantém apenas números, pontos e vírgulas.
     s = str(val).upper().replace("R$", "").strip()
+    # Mantém apenas números, pontos e vírgulas
     s = ''.join(c for c in s if c.isdigit() or c in '.,-')
     
     if not s: return 0.0
     
-    # 2. Contagem para identificação do padrão (BR x US)
     qtd_pontos = s.count('.')
     qtd_virgulas = s.count(',')
     
-    if qtd_pontos == 0 and qtd_virgulas == 0:
-        pass # Apenas números inteiros
-    elif qtd_pontos == 1 and qtd_virgulas == 1:
-        # Padrão misto (ex: 1.467,68 ou 1,467.68)
+    # Tratamento Lógico de Moeda
+    if qtd_pontos == 1 and qtd_virgulas == 1:
         if s.rfind(',') > s.rfind('.'):
-            s = s.replace('.', '').replace(',', '.') # É Padrão BR
+            s = s.replace('.', '').replace(',', '.') # Padrão BR (Ex: 1.467,68)
         else:
-            s = s.replace(',', '') # É Padrão US
+            s = s.replace(',', '') # Padrão US (Ex: 1,467.68)
     elif qtd_pontos > 1 and qtd_virgulas <= 1:
-        # BR longo (ex: 1.000.000,00)
-        s = s.replace('.', '').replace(',', '.')
+        s = s.replace('.', '').replace(',', '.') # Milhão BR
     elif qtd_virgulas > 1 and qtd_pontos <= 1:
-        # US longo (ex: 1,000,000.00)
-        s = s.replace(',', '')
+        s = s.replace(',', '') # Milhão US
     elif qtd_pontos == 1 and qtd_virgulas == 0:
-        # Pode ser US sem milhar (163.96) ou BR milhar sem centavos (1.467)
         if len(s.split('.')[-1]) == 3:
-            s = s.replace('.', '') # Era milhar BR
+            s = s.replace('.', '') # Ex: 1.467 virando 1467
     elif qtd_virgulas == 1 and qtd_pontos == 0:
-        # Pode ser BR sem milhar (163,96) ou US milhar sem centavos (1,467)
         if len(s.split(',')[-1]) == 3:
-            s = s.replace(',', '') # Era milhar US
+            s = s.replace(',', '') # Ex: 1,467 virando 1467
         else:
-            s = s.replace(',', '.') # Era decimal BR
+            s = s.replace(',', '.') # Ex: 163,96 virando 163.96
             
     try:
         return float(s)
@@ -111,13 +105,23 @@ else:
         "⚙️ 4. Auditoria (Logs)"
     ])
 
-    # --- ETL GLOBAL (EXTRAÇÃO E TRANSFORMAÇÃO) ---
+    # --- ETL GLOBAL: EXTRAÇÃO COM TEXTO CRU ---
     try:
         client = get_google_client()
         sheet = client.open_by_url(spreadsheet_url)
         
-        df_lanc = pd.DataFrame(sheet.worksheet("Lancamentos").get_all_records())
-        df_budget = pd.DataFrame(sheet.worksheet("Budget").get_all_records())
+        # O Pulo do Gato: Puxamos os dados como valores de texto bruto, ignorando a conversão do Google
+        ws_lanc = sheet.worksheet("Lancamentos").get_all_values()
+        if ws_lanc and len(ws_lanc) > 1:
+            df_lanc = pd.DataFrame(ws_lanc[1:], columns=ws_lanc[0])
+        else:
+            df_lanc = pd.DataFrame()
+            
+        ws_budget = sheet.worksheet("Budget").get_all_values()
+        if ws_budget and len(ws_budget) > 1:
+            df_budget = pd.DataFrame(ws_budget[1:], columns=ws_budget[0])
+        else:
+            df_budget = pd.DataFrame()
         
         if not df_lanc.empty:
             df_lanc["Total da linha (Num)"] = df_lanc.get("Total da linha", pd.Series()).apply(limpeza_final)
@@ -136,7 +140,7 @@ else:
             df_budget["CONTA"] = df_budget.get("CONTA", pd.Series()).astype(str).str.strip()
 
     except Exception as e:
-        st.error("Falha no Gateway de Dados.")
+        st.error("Falha no Gateway de Dados. Verifique a estrutura da planilha.")
         df_lanc, df_budget = pd.DataFrame(), pd.DataFrame()
 
     # ==========================================
@@ -182,7 +186,7 @@ else:
                         dados_insert = {
                             "Nº NF": nf_num, "CNPJ ou CPF": cnpj, "Nome do cliente/fornecedor": fornecedor,
                             "Data NF": data_emissao.strftime("%d/%m/%Y"), "Data de lançamento": data_emissao.strftime("%d/%m/%Y"),
-                            "Total da linha": valor_linha, "Total documento": valor_linha,
+                            "Total da linha": str(valor_linha).replace(".", ","), "Total documento": str(valor_linha).replace(".", ","),
                             "Conta SAP": conta_sap, "Referência da Nota Fiscal": link_nf,
                             "Data Sistema Entrada": datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
                         }
@@ -235,7 +239,6 @@ else:
                 }), use_container_width=True, hide_index=True
             )
 
-            # --- FERRAMENTA DE AUDITORIA DE CUSTOS ---
             st.markdown("---")
             st.markdown("##### 🕵️ Auditoria de Composição (Drill-Down)")
             st.caption("Selecione a Conta abaixo para ver todas as NFs que compõem o valor gerencial.")
@@ -245,27 +248,19 @@ else:
             
             if conta_auditoria:
                 df_auditoria = l_mes[l_mes["Conta SAP"] == conta_auditoria]
-                
                 colunas_chave = ["Data NF", "Nº NF", "Nome do cliente/fornecedor", "Descrição do item/serviço", "Total da linha (Num)"]
                 colunas_chave = [c for c in colunas_chave if c in df_auditoria.columns]
                 
                 st.warning(f"Encontrados **{len(df_auditoria)}** lançamentos classificados na Conta **{conta_auditoria}** em **{mes_alvo}**.")
-                
-                st.dataframe(
-                    df_auditoria[colunas_chave].style.format({"Total da linha (Num)": formatar_moeda_br}),
-                    use_container_width=True, hide_index=True
-                )
+                st.dataframe(df_auditoria[colunas_chave].style.format({"Total da linha (Num)": formatar_moeda_br}), use_container_width=True, hide_index=True)
 
     # ==========================================
-    # MÓDULO 3: MOTOR PREDITIVO
+    # MÓDULO 3 E 4
     # ==========================================
     with tab3:
-        st.markdown("### 🧠 Inteligência de Planejamento (Forecasting & Sugestão)")
-        st.info("Acumule mais histórico (meses) para o algoritmo de regressão propor cortes e tetos.")
+        st.markdown("### 🧠 Inteligência de Planejamento")
+        st.info("Acumule mais histórico para rodar a IA Preditiva.")
         
-    # ==========================================
-    # MÓDULO 4: AUDITORIA DE LOGS
-    # ==========================================
     with tab4:
-        st.markdown("### ⚙️ Logs do Sistema (Audit_Logs)")
+        st.markdown("### ⚙️ Logs do Sistema")
         st.info("Monitoramento de eventos da API.")
