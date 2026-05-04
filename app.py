@@ -2,16 +2,17 @@ import streamlit as st
 import pandas as pd
 import os
 import gspread
+import datetime
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
 from oauth2client.service_account import ServiceAccountCredentials
 
-# --- CONFIGURAÇÕES DA PÁGINA ---
-st.set_page_config(page_title="BI Gerencial On-Demand", layout="wide")
+# --- CONFIGURAÇÕES DA PÁGINA (VISÃO PLATAFORMA) ---
+st.set_page_config(page_title="Plataforma de Inteligência Financeira", layout="wide", page_icon="🏢")
 
-st.sidebar.header("⚙️ Configurações")
-spreadsheet_url = st.sidebar.text_input("URL da Planilha Google")
-drive_folder_id = st.sidebar.text_input("ID da Pasta no Drive (Opcional)")
+st.sidebar.header("⚙️ Configurações do Sistema")
+spreadsheet_url = st.sidebar.text_input("URL do Banco de Dados (Sheets)")
+drive_folder_id = st.sidebar.text_input("Bucket do Drive (Opcional)")
 
 SCOPE = [
     "https://spreadsheets.google.com/feeds",
@@ -26,7 +27,7 @@ def get_credentials():
         creds_dict = dict(st.secrets["gcp_service_account"])
         return ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
     except KeyError:
-        st.error("⚠️ Credenciais não encontradas nos Secrets do Streamlit!")
+        st.error("⚠️ Falha de Autenticação: Credenciais não encontradas.")
         st.stop()
 
 def get_google_client():
@@ -47,7 +48,9 @@ def upload_to_drive(file, folder_id):
     except Exception as e:
         return None
 
+# --- MOTOR DE NORMALIZAÇÃO DE DADOS ---
 def limpeza_final(val):
+    """Garante a integridade do dado financeiro (Data Quality)"""
     if pd.isna(val) or val == "": return 0.0
     if isinstance(val, (int, float)): return float(val)
     s = str(val).replace("R$", "").replace("\xa0", "").strip()
@@ -69,186 +72,221 @@ def formatar_moeda_br(valor):
         return "R$ 0,00"
 
 # --- APLICATIVO PRINCIPAL ---
-st.title("🚀 Construtor de Gráficos Gerenciais")
+st.title("🏢 Plataforma de Inteligência Financeira")
 
 if not spreadsheet_url:
-    st.warning("⚠️ Insira a URL da Planilha Google na barra lateral para iniciar.")
+    st.info("Conecte a string do Banco de Dados (Sheets URL) para inicializar o sistema.")
 else:
-    tab1, tab2 = st.tabs(["📥 Entrada de NF", "🛠️ Construtor de Gráficos (BI)"])
+    # Arquitetura em Módulos
+    tab1, tab2, tab3 = st.tabs([
+        "📥 Módulo de Ingestão (Data Pipeline)", 
+        "📊 Dashboard Gerencial (BI)", 
+        "⚙️ Auditoria & CFOP"
+    ])
 
     # ==========================================
-    # PROCESSAMENTO DE DADOS (MOTOR DE BI)
+    # CAMADA DE DADOS (ETL / EXTRAÇÃO)
     # ==========================================
     try:
         client = get_google_client()
         sheet = client.open_by_url(spreadsheet_url)
         
-        raw_lanc = sheet.worksheet("Lancamentos").get_all_records()
-        raw_budget = sheet.worksheet("Budget").get_all_records()
+        df_lanc = pd.DataFrame(sheet.worksheet("Lancamentos").get_all_records())
+        df_budget = pd.DataFrame(sheet.worksheet("Budget").get_all_records())
         
-        df_lanc = pd.DataFrame(raw_lanc)
-        df_budget = pd.DataFrame(raw_budget)
-        
-        # --- CRIANDO A TABELA FATO UNIVERSAL ---
-        # 1. Preparar df do Budget
-        df_b = pd.DataFrame()
-        if not df_budget.empty:
-            df_b["Competência"] = pd.to_datetime(df_budget.get("MÊS"), dayfirst=True, errors='coerce').dt.strftime('%m/%Y')
-            df_b["CONTA"] = df_budget.get("CONTA", pd.Series()).astype(str).str.strip()
-            df_b["Categoria (Tipo 1)"] = df_budget.get("TIPO 1", pd.Series()).astype(str).str.strip()
-            df_b["Orçado"] = df_budget.get("BUDGET", pd.Series()).apply(limpeza_final)
-            df_b["Realizado"] = 0.0
-            df_b["Fornecedor"] = "N/A (Apenas Budget)"
-
-        # 2. Preparar df de Lançamentos
-        df_l = pd.DataFrame()
+        # Normalização de Lançamentos
         if not df_lanc.empty:
-            df_l["Competência"] = pd.to_datetime(df_lanc.get("Data de lançamento"), dayfirst=True, errors='coerce').dt.strftime('%m/%Y')
-            df_l["CONTA"] = df_lanc.get("Conta SAP", pd.Series()).astype(str).str.strip()
-            df_l["Fornecedor"] = df_lanc.get("Nome do cliente/fornecedor", pd.Series()).astype(str).str.strip()
-            df_l["Realizado"] = df_lanc.get("Total da linha", pd.Series()).apply(limpeza_final)
-            df_l["Orçado"] = 0.0
+            df_lanc["Total da linha"] = df_lanc.get("Total da linha", pd.Series()).apply(limpeza_final)
+            df_lanc["Total documento"] = df_lanc.get("Total documento", pd.Series()).apply(limpeza_final)
+            df_lanc["Total Impostos Retidos"] = df_lanc.get("Total Impostos Retidos", pd.Series()).apply(limpeza_final)
             
-            # Mapeia a Categoria do Budget para o Lançamento usando a Conta
-            if not df_b.empty:
-                mapa_cat = df_b.drop_duplicates("CONTA").set_index("CONTA")["Categoria (Tipo 1)"].to_dict()
-                df_l["Categoria (Tipo 1)"] = df_l["CONTA"].map(mapa_cat).fillna("Sem Categoria")
-            else:
-                df_l["Categoria (Tipo 1)"] = "Sem Categoria"
-
-        # 3. Empilhar as bases para permitir qualquer agrupamento
-        df_fato = pd.concat([df_b, df_l], ignore_index=True)
+            df_lanc["Data NF"] = pd.to_datetime(df_lanc.get("Data NF", df_lanc.get("Data de lançamento")), dayfirst=True, errors='coerce')
+            df_lanc["Data de vencimento"] = pd.to_datetime(df_lanc.get("Data de vencimento"), dayfirst=True, errors='coerce')
+            df_lanc["Competência"] = df_lanc["Data NF"].dt.strftime('%m/%Y')
+            df_lanc["Conta SAP"] = df_lanc.get("Conta SAP", pd.Series()).astype(str).str.strip()
+            df_lanc["CFOP"] = df_lanc.get("Código CFOP para documento", pd.Series()).astype(str).str.strip()
+        
+        # Normalização de Budget
+        if not df_budget.empty:
+            df_budget["Orçado"] = df_budget.get("BUDGET", pd.Series()).apply(limpeza_final)
+            df_budget["Competência"] = pd.to_datetime(df_budget.get("MÊS"), dayfirst=True, errors='coerce').dt.strftime('%m/%Y')
+            df_budget["CONTA"] = df_budget.get("CONTA", pd.Series()).astype(str).str.strip()
 
     except Exception as e:
-        st.error("Erro ao carregar dados do Google Sheets. Verifique a URL.")
-        df_fato = pd.DataFrame()
+        st.error("Falha no ETL: Erro ao conectar com o banco de dados.")
+        df_lanc = pd.DataFrame()
+        df_budget = pd.DataFrame()
 
     # ==========================================
-    # TAB 1: FORMULÁRIO DE ENTRADA
+    # MÓDULO A: INGESTÃO E VALIDAÇÃO DE DADOS
     # ==========================================
     with tab1:
-        st.subheader("Novo Lançamento")
-        with st.form("form_nf", clear_on_submit=True):
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                nf_num = st.text_input("Nº NF")
-                fornecedor = st.text_input("Fornecedor / Cliente")
-            with col2:
-                data_lanc = st.date_input("Data de lançamento")
-                valor_bruto = st.number_input("Total da linha (R$)", min_value=0.0, format="%.2f")
-            with col3:
-                conta_sap = st.text_input("Conta SAP")
-                arquivo_nf = st.file_uploader("Upload da NF", type=["pdf", "png", "jpg"])
+        st.markdown("### Processamento e Validação de NF")
+        st.caption("O sistema bloqueia entradas com inconsistências de data ou valores divergentes.")
+        
+        with st.form("form_pipeline", clear_on_submit=True):
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                nf_num = st.text_input("Nº NF *")
+                cnpj = st.text_input("CNPJ Fornecedor *")
+            with c2:
+                fornecedor = st.text_input("Razão Social *")
+                cfop = st.text_input("CFOP (Ex: 5102, 1933)")
+            with c3:
+                data_emissao = st.date_input("Data de Emissão (NF) *")
+                data_vencimento = st.date_input("Data de Vencimento *")
+            with c4:
+                conta_sap = st.text_input("Conta SAP / Contábil *")
+                arquivo_nf = st.file_uploader("Documento Fiscal (PDF)", type=["pdf"])
 
-            submit = st.form_submit_button("🚀 Gravar Lançamento")
+            st.markdown("#### Quebra de Valores (O Desafio Técnico)")
+            st.caption("A nota será registrada com o Total do Documento para o Contas a Pagar, mas a apropriação gerencial será feita pelo Total da Linha.")
+            
+            cv1, cv2, cv3 = st.columns(3)
+            with cv1:
+                valor_doc = st.number_input("Total do Documento (R$) *", min_value=0.0, format="%.2f")
+            with cv2:
+                valor_linha = st.number_input("Total da Linha (Rateio) (R$) *", min_value=0.0, format="%.2f")
+            with cv3:
+                impostos = st.number_input("Impostos Retidos (R$)", min_value=0.0, format="%.2f")
 
-        if submit and nf_num and conta_sap:
-            with st.spinner("Registrando nota..."):
-                link_nf = upload_to_drive(arquivo_nf, drive_folder_id) if arquivo_nf and drive_folder_id else "Sem Anexo"
-                try:
-                    worksheet = sheet.worksheet("Lancamentos")
-                    cabecalhos = worksheet.row_values(1)
-                    nova_linha = [""] * len(cabecalhos)
-                    
-                    dados_para_inserir = {
-                        "Nº NF": nf_num, "Nome do cliente/fornecedor": fornecedor,
-                        "Data de lançamento": data_lanc.strftime("%d/%m/%Y"),
-                        "Total documento": valor_bruto, "Total da linha": valor_bruto,
-                        "Conta SAP": conta_sap, "Referência da Nota Fiscal": link_nf
-                    }
-                    for col_nome, valor in dados_para_inserir.items():
-                        if col_nome in cabecalhos: nova_linha[cabecalhos.index(col_nome)] = valor
-                            
-                    worksheet.append_row(nova_linha)
-                    st.success(f"✅ Nota {nf_num} gravada na conta {conta_sap}!")
-                except Exception as e:
-                    st.error(f"Erro ao salvar: {e}")
+            submit = st.form_submit_button("🛡️ Validar e Ingerir Dados", use_container_width=True)
+
+        if submit:
+            # 1. MOTOR DE VALIDAÇÃO (Regras de Negócio)
+            erros_validacao = []
+            if not nf_num or not cnpj or not fornecedor or not conta_sap:
+                erros_validacao.append("Campos obrigatórios (*) não preenchidos.")
+            if data_vencimento < data_emissao:
+                erros_validacao.append("Erro Lógico: A Data de Vencimento não pode ser anterior à Data de Emissão.")
+            if valor_linha > valor_doc:
+                erros_validacao.append("Erro de Rateio: O Total da Linha não pode ser maior que o Total do Documento.")
+            
+            if erros_validacao:
+                for erro in erros_validacao:
+                    st.error(f"❌ {erro}")
+            else:
+                with st.spinner("Pipeline rodando: Validando, fazendo upload e gravando no BD..."):
+                    link_nf = upload_to_drive(arquivo_nf, drive_folder_id) if arquivo_nf and drive_folder_id else "Sem Anexo"
+                    try:
+                        worksheet = sheet.worksheet("Lancamentos")
+                        cabecalhos = worksheet.row_values(1)
+                        nova_linha = [""] * len(cabecalhos)
+                        
+                        dados_insert = {
+                            "Nº NF": nf_num, "CNPJ ou CPF": cnpj, "Nome do cliente/fornecedor": fornecedor,
+                            "Código CFOP para documento": cfop,
+                            "Data NF": data_emissao.strftime("%d/%m/%Y"),
+                            "Data de vencimento": data_vencimento.strftime("%d/%m/%Y"),
+                            "Data de lançamento": data_emissao.strftime("%d/%m/%Y"), # Usando emissão como competência
+                            "Total documento": valor_doc, "Total da linha": valor_linha,
+                            "Total Impostos Retidos": impostos,
+                            "Conta SAP": conta_sap, "Referência da Nota Fiscal": link_nf,
+                            "Status Documento": "Integrado", "Nome do usuário": "App_Streamlit",
+                            "Data Sistema Entrada": datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+                        }
+                        
+                        for col_nome, valor in dados_insert.items():
+                            if col_nome in cabecalhos: nova_linha[cabecalhos.index(col_nome)] = valor
+                                
+                        worksheet.append_row(nova_linha)
+                        st.success(f"✅ Transação {nf_num} ingerida com sucesso no Data Lake/Sheets.")
+                    except Exception as e:
+                        st.error(f"Erro de Banco de Dados: {e}")
 
     # ==========================================
-    # TAB 2: CONSTRUTOR DE GRÁFICOS (EIXO X / EIXO Y)
+    # MÓDULO B: DASHBOARD GERENCIAL E HEATMAP
     # ==========================================
     with tab2:
-        if df_fato.empty:
-            st.info("Aguardando leitura de dados para montar o painel.")
+        if df_lanc.empty or df_budget.empty:
+            st.warning("O BI Gerencial requer dados na base de Lançamentos e Budget.")
         else:
-            st.markdown("### 🎛️ Eixos do Gráfico")
+            # Filtro Global do Dashboard
+            meses_dash = sorted(df_budget["Competência"].dropna().unique().tolist())
+            mes_alvo = st.selectbox("Período de Análise:", meses_dash, index=len(meses_dash)-1 if meses_dash else 0)
             
-            # --- FORMULÁRIO DE PARAMETRIZAÇÃO ---
-            with st.form("form_eixos"):
-                
-                # LINHA 1: Filtro Global
-                meses_disp = sorted(df_fato["Competência"].dropna().unique().tolist())
-                filtro_mes = st.multiselect("📅 Filtro de Meses (Deixe vazio para ver todo o período):", meses_disp, default=meses_disp[-1:] if meses_disp else [])
-                
-                st.markdown("---")
-                
-                # LINHA 2: Seleção de X e Y
-                col_x, col_y = st.columns(2)
-                
-                with col_x:
-                    opcoes_eixo_x = ["Competência", "CONTA", "Categoria (Tipo 1)", "Fornecedor"]
-                    eixo_x = st.selectbox("👉 EIXO X (Como você quer agrupar/dividir os dados?)", opcoes_eixo_x)
-                    
-                with col_y:
-                    # O usuário escolhe quais barras/linhas quer ver. O Delta é calculado depois.
-                    eixo_y = st.multiselect("📊 EIXO Y (O que você quer medir/somar?)", ["Orçado", "Realizado", "Delta (Saldo)"], default=["Orçado", "Realizado"])
+            # Isolando as tabelas (O "Select" do Banco)
+            b_mes = df_budget[df_budget["Competência"] == mes_alvo]
+            l_mes = df_lanc[df_lanc["Competência"] == mes_alvo]
+            
+            # Tabela de Agregação (View)
+            l_grp = l_mes.groupby("Conta SAP")["Total da linha"].sum().reset_index()
+            l_grp.rename(columns={"Conta SAP": "CONTA", "Total da linha": "Realizado"}, inplace=True)
+            
+            # Join Relacional (Comparativo)
+            df_bi = pd.merge(b_mes, l_grp, on="CONTA", how="left").fillna(0)
+            df_bi["Desvio (Variância)"] = df_bi["Orçado"] - df_bi["Realizado"]
+            df_bi["% Consumido"] = (df_bi["Realizado"] / df_bi["Orçado"] * 100).replace([float('inf'), -float('inf')], 0).fillna(0)
 
-                st.markdown("<br>", unsafe_allow_html=True)
-                btn_gerar = st.form_submit_button("⚙️ Gerar Gráficos e Comparação", use_container_width=True)
+            # --- LINHA 1: KPIs EXECUTIVOS ---
+            total_b = df_bi["Orçado"].sum()
+            total_r = df_bi["Realizado"].sum()
+            variancia_total = total_b - total_r
+            
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Budget do Período", formatar_moeda_br(total_b))
+            k2.metric("Realizado (Soma das Linhas)", formatar_moeda_br(total_r), f"{(total_r/total_b*100):.1f}% do Planejado" if total_b > 0 else "0%", delta_color="inverse")
+            k3.metric("Variância (Saving/Estouro)", formatar_moeda_br(variancia_total), "Saudável" if variancia_total >= 0 else "Atenção")
+            
+            impostos_total = l_mes["Total Impostos Retidos"].sum() if "Total Impostos Retidos" in l_mes else 0
+            k4.metric("Impostos Retidos (Cashflow)", formatar_moeda_br(impostos_total))
 
-            # --- RENDERIZAÇÃO APÓS O CLIQUE ---
-            if btn_gerar:
-                st.markdown("---")
+            st.markdown("---")
+
+            # --- LINHA 2: HEATMAP E TIMELINE ---
+            col_heat, col_time = st.columns([2, 1])
+            
+            with col_heat:
+                st.markdown("##### 🔥 Heatmap de Consumo de Budget")
+                st.caption("Contas com % de consumo elevado são destacadas em gradiente térmico.")
                 
-                if not eixo_y:
-                    st.warning("Selecione pelo menos uma métrica no Eixo Y para gerar o gráfico.")
+                df_heat = df_bi[["CONTA", "Categoria (Tipo 1)" if "Categoria (Tipo 1)" in df_bi else "TIPO 1", "Orçado", "Realizado", "% Consumido"]].copy()
+                
+                # Renderiza o Heatmap usando Pandas Styling nativo do Streamlit
+                st.dataframe(
+                    df_heat.style.background_gradient(subset=["% Consumido"], cmap="YlOrRd")
+                    .format({
+                        "Orçado": formatar_moeda_br,
+                        "Realizado": formatar_moeda_br,
+                        "% Consumido": "{:.1f}%"
+                    }),
+                    use_container_width=True, hide_index=True
+                )
+                
+            with col_time:
+                st.markdown("##### 📅 Timeline de Vencimentos")
+                if not l_mes.empty:
+                    vencimentos = l_mes.groupby(l_mes["Data de vencimento"].dt.strftime('%d/%m'))["Total documento"].sum().reset_index()
+                    vencimentos.columns = ["Dia", "Montante a Pagar"]
+                    st.bar_chart(vencimentos.set_index("Dia"), color="#4caf50")
                 else:
-                    # 1. Aplica o filtro de Mês (se houver seleção)
-                    df_plot = df_fato[df_fato["Competência"].isin(filtro_mes)] if filtro_mes else df_fato.copy()
-                    
-                    # 2. Agrupa a Tabela pelo Eixo X escolhido pelo usuário
-                    df_agrupado = df_plot.groupby(eixo_x)[["Orçado", "Realizado"]].sum().reset_index()
-                    
-                    # 3. Calcula o Delta Matemático Pós-Agrupamento
-                    df_agrupado["Delta (Saldo)"] = df_agrupado["Orçado"] - df_agrupado["Realizado"]
-                    
-                    # 4. Ordenação Padrão (Deixar os maiores valores à esquerda no gráfico)
-                    col_ordem = "Orçado" if "Orçado" in eixo_y else "Realizado"
-                    df_agrupado = df_agrupado.sort_values(by=col_ordem, ascending=False)
-                    
-                    # Extrai apenas as colunas que o usuário pediu para visualizar
-                    df_final_grafico = df_agrupado.set_index(eixo_x)[eixo_y]
+                    st.info("Sem vencimentos mapeados para este mês.")
 
-                    # --- EXIBIÇÃO ---
-                    st.markdown(f"### 📈 Comparativo: {', '.join(eixo_y)} por {eixo_x}")
+    # ==========================================
+    # MÓDULO C: AUDITORIA E ANÁLISE DE CFOP
+    # ==========================================
+    with tab3:
+        st.markdown("### Motor Analítico Contábil")
+        if not df_lanc.empty:
+            c_cfop, c_audit = st.columns(2)
+            
+            with c_cfop:
+                st.markdown("##### 📊 Distribuição por CFOP (Natureza da Operação)")
+                st.caption("Visão para a Contabilidade entender onde o dinheiro está alocado.")
+                
+                df_cfop = df_lanc[df_lanc["CFOP"] != "nan"].groupby("CFOP")["Total da linha"].sum().reset_index()
+                if not df_cfop.empty and len(df_cfop) > 0:
+                    df_cfop = df_cfop.sort_values(by="Total da linha", ascending=False)
+                    st.dataframe(df_cfop.style.format({"Total da linha": formatar_moeda_br}), use_container_width=True, hide_index=True)
+                else:
+                    st.write("Sem CFOPs preenchidos no período.")
                     
-                    # Gráficos de Comparação
-                    g1, g2 = st.columns(2)
-                    with g1:
-                        st.markdown("##### Gráfico de Barras")
-                        st.bar_chart(df_final_grafico)
-                    with g2:
-                        st.markdown("##### Gráfico de Linhas")
-                        st.line_chart(df_final_grafico)
-                        
-                    st.markdown("---")
-                    
-                    # Tabela Analítica de Apoio
-                    st.markdown("##### 📋 Tabela Analítica (Detalhe do Eixo X e Y)")
-                    
-                    def pintar_delta(val):
-                        # Pinta de vermelho apenas se for o saldo/delta e for negativo
-                        try:
-                            if float(val) < 0: return 'color: #990000; font-weight: bold;'
-                        except: pass
-                        return ''
-
-                    # Prepara a tabela apenas com as colunas solicitadas
-                    colunas_tabela = [eixo_x] + eixo_y
-                    df_exibicao_tabela = df_agrupado[colunas_tabela].copy()
-
-                    st.dataframe(
-                        df_exibicao_tabela.style.map(pintar_delta).format({col: formatar_moeda_br for col in eixo_y}),
-                        use_container_width=True,
-                        hide_index=True
-                    )
+            with c_audit:
+                st.markdown("##### 🕵️ Log de Auditoria de Entradas")
+                st.caption("Rastreabilidade de quem lançou o dado e quando (Security/Compliance).")
+                
+                cols_audit = ["Nº NF", "Nome do usuário", "Data Sistema Entrada", "Total documento"]
+                df_audit = df_lanc[cols_audit].tail(10).sort_values(by="Data Sistema Entrada", ascending=False)
+                st.dataframe(df_audit.style.format({"Total documento": formatar_moeda_br}), use_container_width=True, hide_index=True)
+        else:
+            st.info("Aguardando lançamentos no banco de dados para gerar a auditoria.")
