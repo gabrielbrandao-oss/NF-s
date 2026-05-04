@@ -7,7 +7,7 @@ from pydrive2.drive import GoogleDrive
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- CONFIGURAÇÕES DA PÁGINA ---
-st.set_page_config(page_title="Controladoria Executiva", layout="wide")
+st.set_page_config(page_title="Hub Financeiro On-Demand", layout="wide")
 
 st.sidebar.header("⚙️ Configurações")
 spreadsheet_url = st.sidebar.text_input("URL da Planilha Google")
@@ -47,49 +47,34 @@ def upload_to_drive(file, folder_id):
     except Exception as e:
         return None
 
-# --- NOVAS FUNÇÕES: TRATAMENTO BRASILEIRO ---
 def limpeza_final(val):
-    """Lê com precisão qualquer formato do Google Sheets e converte para número Python"""
     if pd.isna(val) or val == "": return 0.0
     if isinstance(val, (int, float)): return float(val)
-    
     s = str(val).replace("R$", "").replace("\xa0", "").strip()
     if not s: return 0.0
-    
-    # Identifica se o padrão que veio é BR ou US e trata adequadamente
     if "." in s and "," in s:
-        if s.rfind(",") > s.rfind("."):
-            # Padrão BR: 1.234,56
-            s = s.replace(".", "").replace(",", ".")
-        else:
-            # Padrão US: 1,234.56
-            s = s.replace(",", "")
+        if s.rfind(",") > s.rfind("."): s = s.replace(".", "").replace(",", ".")
+        else: s = s.replace(",", "")
     elif "," in s:
-        # Padrão decimal BR: 1234,56
         s = s.replace(",", ".")
-        
     return pd.to_numeric(s, errors='coerce') or 0.0
 
 def formatar_moeda_br(valor):
-    """Inverte o padrão americano na tela para exibir R$ 1.234,56"""
     try:
         if pd.isna(valor): return "R$ 0,00"
-        # Formata como US primeiro
         txt = f"{float(valor):,.2f}"
-        # Troca a vírgula por X, o ponto por vírgula e o X por ponto
         txt = txt.replace(",", "X").replace(".", ",").replace("X", ".")
         return f"R$ {txt}"
     except:
         return "R$ 0,00"
 
 # --- APLICATIVO PRINCIPAL ---
-st.title("🚀 Hub de Controladoria e B.I.")
+st.title("🚀 Hub Financeiro On-Demand")
 
 if not spreadsheet_url:
     st.warning("⚠️ Insira a URL da Planilha Google na barra lateral para iniciar.")
 else:
-    # Criação das 3 Abas
-    tab1, tab2, tab3 = st.tabs(["📥 Entrada de NF", "🛠️ B.I. Explorer", "📊 Dashboard Gerencial"])
+    tab1, tab2 = st.tabs(["📥 Entrada de NF", "🛠️ Construtor de Dashboard"])
 
     # ==========================================
     # PROCESSAMENTO DE DADOS GLOBAL
@@ -137,144 +122,122 @@ else:
 
             submit = st.form_submit_button("🚀 Gravar Lançamento")
 
-        if submit:
-            if nf_num and conta_sap:
-                with st.spinner("Registrando nota..."):
-                    link_nf = upload_to_drive(arquivo_nf, drive_folder_id) if arquivo_nf and drive_folder_id else "Sem Anexo"
-                    try:
-                        worksheet = sheet.worksheet("Lancamentos")
-                        cabecalhos = worksheet.row_values(1)
-                        nova_linha = [""] * len(cabecalhos)
-                        
-                        dados_para_inserir = {
-                            "Nº NF": nf_num, "Nome do cliente/fornecedor": fornecedor,
-                            "Data de lançamento": data_lanc.strftime("%d/%m/%Y"),
-                            "Total documento": valor_bruto, "Total da linha": valor_bruto,
-                            "Conta SAP": conta_sap, "Referência da Nota Fiscal": link_nf
-                        }
-                        for col_nome, valor in dados_para_inserir.items():
-                            if col_nome in cabecalhos:
-                                nova_linha[cabecalhos.index(col_nome)] = valor
-                                
-                        worksheet.append_row(nova_linha)
-                        st.success(f"✅ Nota {nf_num} gravada na conta {conta_sap}!")
-                    except Exception as e:
-                        st.error(f"Erro ao salvar: {e}")
-            else:
-                st.error("⚠️ 'Nº NF' e 'Conta SAP' são obrigatórios.")
+        if submit and nf_num and conta_sap:
+            with st.spinner("Registrando nota..."):
+                link_nf = upload_to_drive(arquivo_nf, drive_folder_id) if arquivo_nf and drive_folder_id else "Sem Anexo"
+                try:
+                    worksheet = sheet.worksheet("Lancamentos")
+                    cabecalhos = worksheet.row_values(1)
+                    nova_linha = [""] * len(cabecalhos)
+                    
+                    dados_para_inserir = {
+                        "Nº NF": nf_num, "Nome do cliente/fornecedor": fornecedor,
+                        "Data de lançamento": data_lanc.strftime("%d/%m/%Y"),
+                        "Total documento": valor_bruto, "Total da linha": valor_bruto,
+                        "Conta SAP": conta_sap, "Referência da Nota Fiscal": link_nf
+                    }
+                    for col_nome, valor in dados_para_inserir.items():
+                        if col_nome in cabecalhos: nova_linha[cabecalhos.index(col_nome)] = valor
+                            
+                    worksheet.append_row(nova_linha)
+                    st.success(f"✅ Nota {nf_num} gravada na conta {conta_sap}!")
+                except Exception as e:
+                    st.error(f"Erro ao salvar: {e}")
 
     # ==========================================
-    # TAB 2: B.I. EXPLORER (Análise Livre)
+    # TAB 2: CONSTRUTOR DE DASHBOARD
     # ==========================================
     with tab2:
-        st.subheader("🛠️ Construtor de Análises")
-        if not df_lanc.empty and not df_budget.empty:
-            
+        if df_lanc.empty or df_budget.empty:
+            st.info("Aguardando leitura de dados das abas 'Lancamentos' e 'Budget'.")
+        else:
+            # 1. Base Unificada Inteligente
             df_lanc_agrupado = df_lanc.groupby(["Competência", "Conta SAP"]).agg({"Realizado": "sum"}).reset_index()
             df_lanc_agrupado.rename(columns={"Conta SAP": "CONTA"}, inplace=True)
-            df_unificado = pd.merge(df_budget, df_lanc_agrupado, on=["Competência", "CONTA"], how="outer").fillna(0)
-            df_unificado["Saldo"] = df_unificado["Orçado"] - df_unificado["Realizado"]
+            df_comp = pd.merge(df_budget, df_lanc_agrupado, on=["Competência", "CONTA"], how="outer").fillna(0)
+            df_comp["Saldo"] = df_comp["Orçado"] - df_comp["Realizado"]
 
-            base_escolhida = st.radio(
-                "Escolha o conjunto de dados:", 
-                ["Visão Unificada (Budget x Realizado)", "Apenas Lançamentos (NFs)"], 
-                horizontal=True
-            )
+            # --- ÁREA DE PARAMETRIZAÇÃO MANUAL ---
+            st.markdown("### 🎛️ Painel de Configuração")
             
-            df_alvo = df_unificado if base_escolhida == "Visão Unificada (Budget x Realizado)" else df_lanc
-
-            st.markdown("---")
-            col_f, col_p = st.columns([1, 2])
-            
-            with col_f:
-                st.markdown("### 1️⃣ Filtros")
-                meses_un = sorted(df_alvo["Competência"].astype(str).unique().tolist())
-                filtro_mes = st.multiselect("Filtrar por Competência (Mês/Ano):", meses_un, default=meses_un)
-                df_alvo = df_alvo[df_alvo["Competência"].astype(str).isin(filtro_mes)]
-
-            with col_p:
-                st.markdown("### 2️⃣ Estrutura da Tabela")
-                linhas = st.multiselect("Agrupar dados por:", df_alvo.columns.tolist(), default=["CONTA"] if "CONTA" in df_alvo.columns else ["Conta SAP"])
+            with st.form("construtor_dash"):
+                col_param1, col_param2, col_param3 = st.columns(3)
                 
-                cols_numericas = df_alvo.select_dtypes(include='number').columns.tolist()
-                metricas_padrao = ["Orçado", "Realizado", "Saldo"] if base_escolhida == "Visão Unificada (Budget x Realizado)" else ["Realizado"]
-                metricas = st.multiselect("Métricas (Soma):", cols_numericas, default=metricas_padrao)
-
-            if linhas and metricas:
-                df_relatorio = df_alvo.groupby(linhas)[metricas].sum().reset_index()
-                st.markdown("### 📊 Relatório Gerado")
-                st.dataframe(
-                    # Aplica a nossa formatação customizada na Tabela
-                    df_relatorio.style.format({col: formatar_moeda_br for col in metricas}), 
-                    use_container_width=True, 
-                    hide_index=True
-                )
-
-    # ==========================================
-    # TAB 3: DASHBOARD GERENCIAL C-LEVEL
-    # ==========================================
-    with tab3:
-        if df_lanc.empty or df_budget.empty:
-            st.info("O Dashboard precisa que ambas as abas (Lançamentos e Budget) tenham dados válidos.")
-        else:
-            st.subheader("📈 Visão Executiva")
-            
-            meses_dash = sorted(df_budget["Competência"].dropna().unique().tolist())
-            mes_dash_selecionado = st.selectbox("Selecione o Período para Análise:", meses_dash, index=len(meses_dash)-1 if meses_dash else 0)
-            
-            b_dash = df_budget[df_budget["Competência"] == mes_dash_selecionado]
-            l_dash = df_lanc[df_lanc["Competência"] == mes_dash_selecionado]
-            
-            l_dash_grp = l_dash.groupby("Conta SAP")["Realizado"].sum().reset_index()
-            l_dash_grp.rename(columns={"Conta SAP": "CONTA"}, inplace=True)
-            df_dash = pd.merge(b_dash, l_dash_grp, on="CONTA", how="left").fillna(0)
-            
-            total_orcado = df_dash["Orçado"].sum()
-            total_realizado = df_dash["Realizado"].sum()
-            saldo_geral = total_orcado - total_realizado
-            pct_consumo = (total_realizado / total_orcado * 100) if total_orcado > 0 else 0
-            
-            k1, k2, k3, k4 = st.columns(4)
-            # Usando a formatação BR nos cartões principais
-            k1.metric("Budget do Mês", formatar_moeda_br(total_orcado))
-            
-            # Formatação de porcentagem (Ex: 85.5% para 85,5%)
-            pct_texto = f"{pct_consumo:.1f}%".replace(".", ",") + " do Budget"
-            k2.metric("Consumo Realizado", formatar_moeda_br(total_realizado), pct_texto, delta_color="inverse")
-            
-            k3.metric("Saldo Disponível", formatar_moeda_br(saldo_geral), "Atenção" if saldo_geral < 0 else "Saudável")
-            
-            st.progress(min(pct_consumo / 100, 1.0))
-            st.markdown("---")
-            
-            cg1, cg2 = st.columns(2)
-            
-            with cg1:
-                st.markdown("##### 🚨 Top 5 Contas com Maior Consumo")
-                df_top_contas = df_dash.sort_values(by="Realizado", ascending=False).head(5)
-                chart_data = df_top_contas.set_index("TIPO 1" if "TIPO 1" in df_top_contas else "CONTA")[["Orçado", "Realizado"]]
-                st.bar_chart(chart_data)
+                with col_param1:
+                    base_sel = st.selectbox("1. Qual base analisar?", ["Comparativo (Budget x Realizado)", "Apenas Lançamentos (Detalhado)"])
+                    meses_disponiveis = sorted(df_comp["Competência"].astype(str).unique().tolist())
+                    meses_sel = st.multiselect("2. Filtrar Meses:", meses_disponiveis, default=meses_disponiveis[-1:] if meses_disponiveis else [])
                 
-            with cg2:
-                st.markdown("##### 🏆 Top 5 Maiores Fornecedores do Mês")
-                if "Nome do cliente/fornecedor" in l_dash.columns:
-                    top_fornecedores = l_dash.groupby("Nome do cliente/fornecedor")["Realizado"].sum().sort_values(ascending=False).head(5)
-                    st.bar_chart(top_fornecedores, color="#ff4b4b")
+                with col_param2:
+                    df_alvo = df_comp if base_sel == "Comparativo (Budget x Realizado)" else df_lanc
+                    
+                    opcoes_agrupamento = df_alvo.columns.tolist()
+                    default_grp = "CONTA" if "CONTA" in opcoes_agrupamento else "Conta SAP"
+                    
+                    agrupamento_sel = st.selectbox("3. Agrupar Análise Por (Eixo X):", opcoes_agrupamento, index=opcoes_agrupamento.index(default_grp) if default_grp in opcoes_agrupamento else 0)
+                    
+                    opcoes_metricas = ["Orçado", "Realizado", "Saldo"] if base_sel == "Comparativo (Budget x Realizado)" else ["Realizado"]
+                    metricas_sel = st.multiselect("4. Valores para Somar (Eixo Y):", opcoes_metricas, default=opcoes_metricas)
+
+                with col_param3:
+                    visuais_sel = st.multiselect(
+                        "5. O que gerar no Dashboard?", 
+                        ["Cartões Resumo (KPIs)", "Gráfico de Barras", "Gráfico de Linha", "Tabela de Dados"], 
+                        default=["Cartões Resumo (KPIs)", "Gráfico de Barras", "Tabela de Dados"]
+                    )
+                
+                btn_gerar = st.form_submit_button("🚀 Gerar Dashboard Agora", use_container_width=True)
+
+            # --- GERAÇÃO DO DASHBOARD SOB DEMANDA ---
+            if btn_gerar:
+                st.markdown("---")
+                
+                if not meses_sel:
+                    st.error("Selecione ao menos um mês para gerar o relatório.")
+                elif not metricas_sel:
+                    st.error("Selecione ao menos uma métrica (Valor) para somar.")
                 else:
-                    st.write("Dados de fornecedores indisponíveis.")
+                    # Aplica o filtro de mês
+                    df_filtrado = df_alvo[df_alvo["Competência"].astype(str).isin(meses_sel)].copy()
+                    
+                    # Gera a Tabela Dinâmica com as seleções do usuário
+                    df_relatorio = df_filtrado.groupby(agrupamento_sel)[metricas_sel].sum().reset_index()
 
-            st.markdown("---")
-            st.markdown("##### 📋 Resumo Analítico")
-            df_dash["% Executado"] = (df_dash["Realizado"] / df_dash["Orçado"] * 100).replace([float('inf'), -float('inf')], 0).fillna(0)
-            df_dash["Status"] = df_dash["% Executado"].apply(lambda x: "🔴 Estourado" if x > 100 else ("🟡 Alerta" if x > 85 else "🟢 OK"))
-            
-            # Ajuste de exibição visual com formato brasileiro nas tabelas
-            st.dataframe(
-                df_dash[["CONTA", "TIPO 1", "Orçado", "Realizado", "Status", "% Executado"]].style.format({
-                    "Orçado": formatar_moeda_br,
-                    "Realizado": formatar_moeda_br,
-                    "% Executado": lambda x: f"{x:.1f}%".replace(".", ",")
-                }),
-                use_container_width=True,
-                hide_index=True
-            )
+                    st.markdown(f"## 📊 Dashboard de {agrupamento_sel}")
+                    st.caption(f"Meses analisados: {', '.join(meses_sel)} | Base: {base_sel}")
+                    
+                    # 1. Módulo: Cartões Resumo (KPIs)
+                    if "Cartões Resumo (KPIs)" in visuais_sel:
+                        cols_kpi = st.columns(len(metricas_sel))
+                        for i, metrica in enumerate(metricas_sel):
+                            total = df_relatorio[metrica].sum()
+                            cols_kpi[i].metric(f"Total: {metrica}", formatar_moeda_br(total))
+                        st.markdown("<br>", unsafe_allow_html=True)
+
+                    # 2. Módulo: Gráfico de Barras
+                    if "Gráfico de Barras" in visuais_sel:
+                        st.markdown("##### Visão em Barras")
+                        # Ordena pelo primeiro valor selecionado para o gráfico ficar bonito
+                        df_chart = df_relatorio.sort_values(by=metricas_sel[0], ascending=False).head(15) 
+                        st.bar_chart(df_chart.set_index(agrupamento_sel)[metricas_sel])
+
+                    # 3. Módulo: Gráfico de Linha
+                    if "Gráfico de Linha" in visuais_sel:
+                        st.markdown("##### Visão em Linha")
+                        st.line_chart(df_relatorio.set_index(agrupamento_sel)[metricas_sel])
+
+                    # 4. Módulo: Tabela de Dados (Matriz)
+                    if "Tabela de Dados" in visuais_sel:
+                        st.markdown("##### Matriz de Dados")
+                        
+                        # Função interna para pintar o "Saldo" de vermelho se for negativo
+                        def pintar_saldo(row):
+                            if "Saldo" in row.index and row["Saldo"] < 0:
+                                return ['background-color: #ffe6e6'] * len(row)
+                            return [''] * len(row)
+
+                        st.dataframe(
+                            df_relatorio.style.apply(pintar_saldo, axis=1).format({col: formatar_moeda_br for col in metricas_sel}),
+                            use_container_width=True,
+                            hide_index=True
+                        )
