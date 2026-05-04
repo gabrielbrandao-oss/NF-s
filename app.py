@@ -9,10 +9,10 @@ from pydrive2.drive import GoogleDrive
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- CONFIGURAÇÕES DO SGGAG ---
-st.set_page_config(page_title="SGGAG | Dashboard Executivo", layout="wide", page_icon="📊")
+st.set_page_config(page_title="SGGAG | Controladoria & CFO Dashboard", layout="wide", page_icon="📈")
 
-st.sidebar.title("📊 SGGAG Engine")
-st.sidebar.caption("Sistema Global de Gestão e Análise de Gastos")
+st.sidebar.title("📈 SGGAG Engine")
+st.sidebar.caption("Plataforma de Inteligência Financeira")
 spreadsheet_url = st.sidebar.text_input("Data Lake (Google Sheets URL)")
 drive_folder_id = st.sidebar.text_input("AWS S3 / Drive Bucket (Opcional)")
 
@@ -80,15 +80,15 @@ def formatar_moeda_br(valor):
 
 # --- CORE DO SISTEMA ---
 if not spreadsheet_url:
-    st.info("Conecte o Data Lake (URL da Planilha) para inicializar o SGGAG.")
+    st.info("Conecte o Data Lake (URL da Planilha) para inicializar a Plataforma.")
 else:
     tab1, tab2, tab3 = st.tabs([
         "📥 Ingestão & Staging", 
-        "📈 Dashboard Executivo", 
-        "⚙️ Configurações & Logs"
+        "👔 Dashboard Nível CFO", 
+        "⚙️ Auditoria & Logs"
     ])
 
-    # --- ETL GLOBAL: EXTRAÇÃO DE ALTA FIDELIDADE ---
+    # --- ETL GLOBAL ---
     try:
         client = get_google_client()
         sheet = client.open_by_url(spreadsheet_url)
@@ -114,7 +114,7 @@ else:
             df_budget["CONTA"] = df_budget.get("CONTA", pd.Series()).astype(str).str.strip()
 
     except Exception as e:
-        st.error("Falha no Gateway de Dados. Verifique a estrutura da planilha.")
+        st.error("Falha no Gateway de Dados. Verifique a URL.")
         df_lanc, df_budget = pd.DataFrame(), pd.DataFrame()
 
     # ==========================================
@@ -162,20 +162,25 @@ else:
                     except Exception as e: st.error(f"Erro no BD: {e}")
 
     # ==========================================
-    # MÓDULO 2: DASHBOARD EXECUTIVO (TURBINADO)
+    # MÓDULO 2: DASHBOARD NÍVEL CFO (COM MRR)
     # ==========================================
     with tab2:
         if not df_lanc.empty and not df_budget.empty:
             
-            # --- FILTRO GLOBAL ---
+            # --- MENU DE CONTROLE E SETUP FINANCEIRO ---
+            st.markdown("### Parâmetros do Mês")
+            col_f1, col_f2 = st.columns([1, 2])
+            
             meses_dash = sorted(df_budget["Competência"].dropna().unique().tolist())
-            col_f1, col_f2, col_f3 = st.columns([1, 2, 1])
+            with col_f1:
+                mes_alvo = st.selectbox("📅 Competência (Período):", meses_dash, index=len(meses_dash)-1 if meses_dash else 0)
             with col_f2:
-                mes_alvo = st.selectbox("📅 Selecione a Competência para Análise:", meses_dash, index=len(meses_dash)-1 if meses_dash else 0)
+                # O Novo Input Gerencial (MRR)
+                mrr_input = st.number_input("💰 Inserir MRR / Receita do Mês (R$)", min_value=0.0, format="%.2f", help="Insira o faturamento do mês para calcular as margens e a representatividade dos custos.")
             
             st.markdown("---")
             
-            # --- PREPARAÇÃO DOS DADOS ---
+            # --- PROCESSAMENTO MATEMÁTICO ---
             b_mes = df_budget[df_budget["Competência"] == mes_alvo].copy()
             l_mes = df_lanc[df_lanc["Competência"] == mes_alvo].copy()
             
@@ -187,63 +192,78 @@ else:
             
             tot_orc = df_bi["Orçado"].sum()
             tot_real = df_bi["Realizado"].sum()
-            pct_consumo = (tot_real / tot_orc * 100) if tot_orc > 0 else 0
-
-            # --- LINHA 1: KPIS PRINCIPAIS ---
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("💼 Budget Aprovado", formatar_moeda_br(tot_orc))
-            k2.metric("💸 Consumo Realizado", formatar_moeda_br(tot_real), f"Impacto: {pct_consumo:.1f}%", delta_color="off")
-            k3.metric("⚖️ Variância (Saldo)", formatar_moeda_br(tot_orc - tot_real), "Saudável" if (tot_orc - tot_real) >= 0 else "Estourado", delta_color="normal")
             
-            # Gauge de Progresso
-            with k4:
-                st.markdown(f"**Nível de Consumo:** `{pct_consumo:.1f}%`")
-                st.progress(min(pct_consumo / 100, 1.0))
+            # Variáveis Gerenciais
+            pct_consumo_budget = (tot_real / tot_orc * 100) if tot_orc > 0 else 0
+            lucro_operacional = mrr_input - tot_real
+            margem_pct = (lucro_operacional / mrr_input * 100) if mrr_input > 0 else 0
+            burn_rate_pct = (tot_real / mrr_input * 100) if mrr_input > 0 else 0
+
+            # --- LINHA 1: VISÃO DE RECEITA E MARGEM (P&L) ---
+            st.markdown("##### 💼 Visão de P&L (Profit & Loss)")
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Receita (MRR)", formatar_moeda_br(mrr_input))
+            k2.metric("Despesas (Total Realizado)", formatar_moeda_br(tot_real))
+            
+            if mrr_input > 0:
+                k3.metric("Lucro / Margem Operacional", formatar_moeda_br(lucro_operacional), f"{margem_pct:.1f}% de Margem", delta_color="normal")
+                k4.metric("Burn Rate (Custos sobre Receita)", f"{burn_rate_pct:.1f}%", "Atenção: Margem Baixa" if burn_rate_pct > 80 else "Margem Saudável", delta_color="inverse")
+            else:
+                k3.metric("Lucro / Margem Operacional", "Aguardando MRR...")
+                k4.metric("Burn Rate (Custos sobre Receita)", "Aguardando MRR...")
 
             st.markdown("<br>", unsafe_allow_html=True)
 
-            # --- LINHA 2: GRÁFICOS ANALÍTICOS ---
-            col_chart1, col_chart2 = st.columns(2)
+            # --- LINHA 2: VISÃO DE CONTROLE ORÇAMENTÁRIO ---
+            st.markdown("##### 🎯 Controle Orçamentário (Budget)")
+            b1, b2, b3, b4 = st.columns(4)
+            b1.metric("Budget Planejado", formatar_moeda_br(tot_orc))
+            b2.metric("Saldo do Budget", formatar_moeda_br(tot_orc - tot_real), "Estouro de Verba" if (tot_orc - tot_real) < 0 else "Dentro da Meta", delta_color="normal")
             
-            # Preparando rótulo para os gráficos (Usa TIPO 1 se tiver, senão usa CONTA)
-            coluna_rotulo = "TIPO 1" if "TIPO 1" in df_bi.columns else "CONTA"
-            
-            with col_chart1:
-                st.markdown("##### 📊 Orçado vs Realizado (Visão Geral)")
-                df_chart_comp = df_bi.set_index(coluna_rotulo)[["Orçado", "Realizado"]].sort_values("Orçado", ascending=False)
-                st.bar_chart(df_chart_comp, color=["#1f77b4", "#ff7f0e"]) # Azul para Budget, Laranja para Realizado
-                
-            with col_chart2:
-                st.markdown("##### 🔥 Top 5 Ofensores do Mês")
-                df_top5 = df_bi.sort_values("Realizado", ascending=False).head(5)
-                st.bar_chart(df_top5.set_index(coluna_rotulo)["Realizado"], color="#d62728") # Vermelho para alerta
+            with b3:
+                st.markdown(f"**Consumo do Budget:** `{pct_consumo_budget:.1f}%`")
+                st.progress(min(pct_consumo_budget / 100, 1.0))
 
             st.markdown("---")
 
-            # --- LINHA 3: TABELA MATRIZ COM BARRAS DE PROGRESSO ---
-            st.markdown("##### 📋 Matriz Detalhada de Despesas")
+            # --- LINHA 3: GRÁFICOS ANALÍTICOS ---
+            coluna_rotulo = "TIPO 1" if "TIPO 1" in df_bi.columns else "CONTA"
+            col_chart1, col_chart2 = st.columns([2, 1])
             
-            # Calcula a porcentagem individual para a tabela
-            df_bi["% Utilizado"] = np.where(df_bi["Orçado"] > 0, (df_bi["Realizado"] / df_bi["Orçado"]) * 100, 0)
+            with col_chart1:
+                st.markdown("##### 📊 Orçado vs Realizado (Por Conta)")
+                df_chart_comp = df_bi.set_index(coluna_rotulo)[["Orçado", "Realizado"]].sort_values("Orçado", ascending=False).head(10) # Top 10 para não poluir
+                st.bar_chart(df_chart_comp, color=["#1f77b4", "#ff7f0e"])
+                
+            with col_chart2:
+                st.markdown("##### 💸 Top Ofensores (Maiores Gastos)")
+                df_top5 = df_bi.sort_values("Realizado", ascending=False).head(5)
+                st.bar_chart(df_top5.set_index(coluna_rotulo)["Realizado"], color="#d62728")
+
+            st.markdown("---")
+
+            # --- LINHA 4: MATRIZ DE UNIT ECONOMICS ---
+            st.markdown("##### 📋 Matriz Analítica (Unit Economics)")
             
-            # Status Emoji
+            df_bi["% Utilizado do Budget"] = np.where(df_bi["Orçado"] > 0, (df_bi["Realizado"] / df_bi["Orçado"]) * 100, 0)
+            df_bi["% Consumo da Receita"] = np.where(mrr_input > 0, (df_bi["Realizado"] / mrr_input) * 100, 0)
             df_bi["Status"] = np.where(df_bi["Realizado"] > df_bi["Orçado"], "🔴 Estourou", np.where(df_bi["Realizado"] > df_bi["Orçado"]*0.85, "🟡 Alerta", "🟢 Seguro"))
 
-            # Exibição rica do dataframe usando configurações de coluna nativas do Streamlit
             st.dataframe(
-                df_bi[["CONTA", coluna_rotulo, "Orçado", "Realizado", "Desvio", "% Utilizado", "Status"]],
+                df_bi[["CONTA", coluna_rotulo, "Orçado", "Realizado", "Desvio", "% Utilizado do Budget", "% Consumo da Receita", "Status"]],
                 column_config={
                     "CONTA": st.column_config.TextColumn("Conta SAP"),
                     coluna_rotulo: st.column_config.TextColumn("Categoria"),
                     "Orçado": st.column_config.NumberColumn("Budget P.", format="R$ %.2f"),
                     "Realizado": st.column_config.NumberColumn("Realizado", format="R$ %.2f"),
-                    "Desvio": st.column_config.NumberColumn("Saldo/Desvio", format="R$ %.2f"),
-                    "% Utilizado": st.column_config.ProgressColumn(
-                        "% Consumo",
-                        help="Percentual do Budget gasto (barra enche até 100%)",
-                        format="%.1f%%",
-                        min_value=0,
-                        max_value=100,
+                    "Desvio": st.column_config.NumberColumn("Saldo", format="R$ %.2f"),
+                    "% Utilizado do Budget": st.column_config.ProgressColumn(
+                        "% do Budget", format="%.1f%%", min_value=0, max_value=100,
+                    ),
+                    "% Consumo da Receita": st.column_config.ProgressColumn(
+                        "🔥 % da Receita (MRR)", 
+                        help="Quantos % da receita essa despesa engoliu", 
+                        format="%.2f%%", min_value=0, max_value=100,
                     ),
                     "Status": st.column_config.TextColumn("Status")
                 },
@@ -251,30 +271,22 @@ else:
                 use_container_width=True
             )
 
-            # --- LINHA 4: AUDITORIA DRILL-DOWN ---
-            with st.expander("🕵️ Clique aqui para Abrir a Auditoria de Notas (Drill-Down)"):
-                st.caption("Investigue exatamente quais notas fiscais formam o valor de cada conta.")
-                
+            # --- LINHA 5: AUDITORIA DRILL-DOWN ---
+            with st.expander("🕵️ Auditoria de Notas (Drill-Down / Rastreador de Custos)"):
                 contas_usadas = sorted(l_mes[l_mes["Total da linha (Num)"] > 0]["Conta SAP"].unique().tolist())
-                conta_auditoria = st.selectbox("Escolha a Conta SAP para rastrear:", [""] + contas_usadas)
+                conta_auditoria = st.selectbox("Escolha a Conta SAP para rastrear a origem do valor:", [""] + contas_usadas)
                 
                 if conta_auditoria:
                     df_auditoria = l_mes[l_mes["Conta SAP"] == conta_auditoria]
                     colunas_chave = [c for c in ["Data NF", "Nº NF", "Nome do cliente/fornecedor", "Descrição do item/serviço", "Total da linha (Num)"] if c in df_auditoria.columns]
-                    
-                    st.dataframe(
-                        df_auditoria[colunas_chave].style.format({"Total da linha (Num)": formatar_moeda_br}),
-                        use_container_width=True, hide_index=True
-                    )
+                    st.dataframe(df_auditoria[colunas_chave].style.format({"Total da linha (Num)": formatar_moeda_br}), use_container_width=True, hide_index=True)
 
     # ==========================================
-    # MÓDULO 3: CONFIGURAÇÕES E LOGS
+    # MÓDULO 3: LOGS
     # ==========================================
     with tab3:
-        st.markdown("### ⚙️ Logs do Sistema (Audit)")
+        st.markdown("### ⚙️ Logs e Rastreabilidade")
         if not df_lanc.empty:
             cols_audit = ["Data Sistema Entrada", "Nº NF", "Nome do cliente/fornecedor"]
             if "Data Sistema Entrada" in df_lanc.columns:
                 st.dataframe(df_lanc[cols_audit].tail(10).sort_values("Data Sistema Entrada", ascending=False), use_container_width=True, hide_index=True)
-            else:
-                st.info("Log indisponível.")
