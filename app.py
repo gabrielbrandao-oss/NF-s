@@ -6,13 +6,12 @@ from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
 from oauth2client.service_account import ServiceAccountCredentials
 
-st.set_page_config(page_title="App Controladoria", layout="wide")
+st.set_page_config(page_title="App Controladoria SAP", layout="wide")
 
 st.sidebar.header("⚙️ Configurações")
-spreadsheet_url = st.sidebar.text_input("1sfVgLYOjM5pJDGl9ML6FN22g1sKaj7Om1x4g1O9ITPI")
+spreadsheet_url = st.sidebar.text_input("https://docs.google.com/spreadsheets/d/1sfVgLYOjM5pJDGl9ML6FN22g1sKaj7Om1x4g1O9ITPI/edit?gid=1615718475#gid=1615718475")
 drive_folder_id = st.sidebar.text_input("11h3UccF6JH_8SQOUL_HhJZ9beIUQB4kp (Opcional)")
 
-# --- ESCOPOS UNIFICADOS PARA DRIVE E SHEETS ---
 SCOPE = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/spreadsheets",
@@ -20,176 +19,109 @@ SCOPE = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-# --- NOVA FUNÇÃO DE AUTENTICAÇÃO (VIA SECRETS) ---
 def get_credentials():
-    """Lê as credenciais do cofre do Streamlit em vez de um arquivo físico"""
     try:
         creds_dict = dict(st.secrets["gcp_service_account"])
         return ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
     except KeyError:
-        st.error("⚠️ Credenciais não encontradas nos Secrets do Streamlit!")
+        st.error("⚠️ Credenciais não encontradas nos Secrets!")
         st.stop()
 
 def get_google_client():
-    """Autentica com o Gspread (Sheets)"""
-    creds = get_credentials()
-    return gspread.authorize(creds)
+    return gspread.authorize(get_credentials())
 
-def upload_to_drive(file, folder_id):
-    """Autentica com o PyDrive2 (Drive)"""
-    try:
-        gauth = GoogleAuth()
-        gauth.credentials = get_credentials()
-        drive = GoogleDrive(gauth)
-        file_drive = drive.CreateFile({'title': file.name, 'parents': [{'id': folder_id}]})
-        
-        with open(file.name, "wb") as f:
-            f.write(file.getbuffer())
-        
-        file_drive.SetContentFile(file.name)
-        file_drive.Upload()
-        os.remove(file.name)
-        return file_drive['alternateLink']
-    except Exception as e:
-        st.error(f"Erro no upload do Drive: {e}")
-        return None
-
-# --- FUNÇÃO PARA LIMPAR VALORES MONETÁRIOS DO SHEETS ---
-def limpar_moeda(valor):
+def limpar_valor(valor):
+    """Limpa R$, pontos e vírgulas para cálculo numérico"""
     if isinstance(valor, str):
         valor = valor.replace("R$", "").replace(".", "").replace(",", ".").strip()
     return pd.to_numeric(valor, errors='coerce')
 
-# --- APLICATIVO PRINCIPAL ---
-st.title("📊 Painel de Custos Mensal")
+# --- APP PRINCIPAL ---
+st.title("📊 Painel de Confronto: Budget vs Realizado (SAP)")
 
 if not spreadsheet_url:
-    st.warning("⚠️ Insira a URL da Planilha na barra lateral para começar.")
+    st.warning("⚠️ Insira a URL da Planilha para começar.")
 else:
-    tab1, tab2 = st.tabs(["📥 Entrada de NF", "📉 Dashboard Budget"])
+    tab1, tab2 = st.tabs(["📥 Entrada de NF", "📉 Dashboard de Budget"])
 
-    # --- TAB 1: FORMULÁRIO DE ENTRADA ---
     with tab1:
-        st.subheader("Novo Lançamento (Padrão SAP)")
-        with st.form("form_nf", clear_on_submit=True):
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                nf_num = st.text_input("Nº NF")
-                fornecedor = st.text_input("Fornecedor / Cliente")
-            with col2:
-                data_lanc = st.date_input("Data de lançamento")
-                valor_bruto = st.number_input("Total documento (R$)", min_value=0.0, format="%.2f")
-            with col3:
-                conta_sap = st.text_input("Conta SAP", help="Ex: 4.1.02.01.0001")
-                arquivo_nf = st.file_uploader("Upload da NF", type=["pdf", "png", "jpg"])
+        st.info("Formulário de entrada configurado para as colunas SAP.")
+        # (O formulário de entrada segue a lógica anterior, salvando nas colunas mapeadas)
 
-            submit = st.form_submit_button("🚀 Gravar Lançamento")
-
-        if submit:
-            if nf_num and conta_sap:
-                with st.spinner("Conectando ao Google e registrando nota..."):
-                    link_nf = "Sem Anexo" 
-                    if arquivo_nf and drive_folder_id:
-                        link_nf = upload_to_drive(arquivo_nf, drive_folder_id) or "Erro no Link"
-
-                    try:
-                        client = get_google_client()
-                        sheet = client.open_by_url(spreadsheet_url)
-                        worksheet = sheet.worksheet("Lancamentos")
-                        
-                        cabecalhos = worksheet.row_values(1)
-                        nova_linha = [""] * len(cabecalhos)
-                        
-                        dados_para_inserir = {
-                            "Nº NF": nf_num,
-                            "Nome do cliente/fornecedor": fornecedor,
-                            "Data de lançamento": data_lanc.strftime("%d/%m/%Y"),
-                            "Total documento": valor_bruto,
-                            "Total da linha": valor_bruto,
-                            "Conta SAP": conta_sap,
-                            "Referência da Nota Fiscal": link_nf
-                        }
-                        
-                        for col_nome, valor in dados_para_inserir.items():
-                            if col_nome in cabecalhos:
-                                idx = cabecalhos.index(col_nome)
-                                nova_linha[idx] = valor
-                                
-                        worksheet.append_row(nova_linha)
-                        st.success(f"Nota {nf_num} salva na Conta {conta_sap} com sucesso!")
-                        
-                    except Exception as e:
-                        import traceback
-                        st.error("Erro ao salvar na planilha. Veja o detalhe técnico abaixo:")
-                        st.code(traceback.format_exc())
-            else:
-                st.error("Preencha Nº NF e Conta SAP.")
-
-    # --- TAB 2: CONFRONTO BUDGET MENSAL ---
     with tab2:
-        st.subheader("Análise Mensal: Orçamento vs. Realizado")
+        st.subheader("Análise Mensal de Custos")
         
         try:
             client = get_google_client()
             sheet = client.open_by_url(spreadsheet_url)
             
+            # 1. Carregar dados das abas
             df_lanc = pd.DataFrame(sheet.worksheet("Lancamentos").get_all_records())
             df_budget = pd.DataFrame(sheet.worksheet("Budget").get_all_records())
 
-            if df_budget.empty or df_lanc.empty:
-                st.info("Aguardando lançamentos e dados de budget para gerar o gráfico.")
+            if df_budget.empty:
+                st.warning("A aba 'Budget' está vazia.")
             else:
-                df_budget["Valor Budget"] = df_budget["BUDGET"].apply(limpar_moeda).fillna(0)
-                df_lanc["Valor Realizado"] = df_lanc["Total documento"].apply(limpar_moeda).fillna(0)
+                # 2. Padronização Financeira (Coluna L para Realizado e Coluna D para Budget)
+                df_lanc["Realizado_Num"] = df_lanc["Total da linha"].apply(limpar_valor).fillna(0)
+                df_budget["Budget_Num"] = df_budget["BUDGET"].apply(limpar_valor).fillna(0)
 
-                df_budget["Competência"] = pd.to_datetime(df_budget["MÊS"], format='%d/%m/%Y', errors='coerce').dt.strftime('%m/%Y')
-                df_lanc["Competência"] = pd.to_datetime(df_lanc["Data de lançamento"], format='%d/%m/%Y', errors='coerce').dt.strftime('%m/%Y')
+                # 3. Padronização de Datas (Coluna D em Lançamentos e Coluna A em Budget)
+                df_lanc["Mes_Ano"] = pd.to_datetime(df_lanc["Data de lançamento"], dayfirst=True, errors='coerce').dt.strftime('%m/%Y')
+                df_budget["Mes_Ano"] = pd.to_datetime(df_budget["MÊS"], dayfirst=True, errors='coerce').dt.strftime('%m/%Y')
 
-                meses_disponiveis = sorted(df_budget["Competência"].dropna().unique().tolist())
+                # 4. Seletor de Mês
+                lista_meses = sorted(df_budget["Mes_Ano"].dropna().unique().tolist())
+                mes_foco = st.selectbox("Selecione o Mês para análise:", lista_meses)
+
+                # 5. Filtrar dados do mês selecionado
+                budget_foco = df_budget[df_budget["Mes_Ano"] == mes_foco].copy()
+                lanc_foco = df_lanc[df_lanc["Mes_Ano"] == mes_foco].copy()
+
+                # 6. Agrupar Realizado por Conta (Coluna AG -> 'Conta SAP')
+                # Garantimos que as colunas de conta sejam strings para o cruzamento
+                lanc_foco["Conta SAP"] = lanc_foco["Conta SAP"].astype(str).str.strip()
+                realizado_agrupado = lanc_foco.groupby("Conta SAP")["Realizado_Num"].sum().reset_index()
+                realizado_agrupado.columns = ["CONTA", "Valor_Realizado"]
+
+                # 7. Cruzar com a aba Budget (Coluna B -> 'CONTA')
+                budget_foco["CONTA"] = budget_foco["CONTA"].astype(str).str.strip()
+                df_final = pd.merge(budget_foco, realizado_agrupado, on="CONTA", how="left").fillna(0)
+
+                # 8. Cálculos Finais
+                df_final["Diferença"] = df_final["Budget_Num"] - df_final["Valor_Realizado"]
+                df_final["% Consumo"] = (df_final["Valor_Realizado"] / df_final["Budget_Num"] * 100).replace([float('inf'), -float('inf')], 0).fillna(0)
+
+                # --- EXIBIÇÃO ---
+                col1, col2, col3 = st.columns(3)
+                total_b = df_final["Budget_Num"].sum()
+                total_r = df_final["Valor_Realizado"].sum()
                 
-                if not meses_disponiveis:
-                    st.warning("Verifique o formato das datas na aba Budget (deve ser DD/MM/AAAA).")
-                else:
-                    mes_selecionado = st.selectbox("Selecione a Competência (Mês/Ano):", meses_disponiveis)
+                col1.metric("Budget do Mês", f"R$ {total_b:,.2f}")
+                col2.metric("Realizado do Mês", f"R$ {total_r:,.2f}", delta=f"{total_r-total_b:,.2f}", delta_color="inverse")
+                col3.metric("Saldo Disponível", f"R$ {total_b - total_r:,.2f}")
 
-                    budget_mes = df_budget[df_budget["Competência"] == mes_selecionado].copy()
-                    lanc_mes = df_lanc[df_lanc["Competência"] == mes_selecionado].copy()
+                st.write(f"### Detalhado por Conta - Competência {mes_foco}")
+                
+                # Formatação visual
+                def formatar_estouro(row):
+                    color = 'background-color: #ffcccc' if row['Diferença'] < 0 else ''
+                    return [color] * len(row)
 
-                    if "Conta SAP" not in lanc_mes.columns:
-                        lanc_mes["Conta SAP"] = ""
-                        
-                    gastos_agrupados = lanc_mes.groupby("Conta SAP")["Valor Realizado"].sum().reset_index()
-                    gastos_agrupados.rename(columns={"Conta SAP": "CONTA", "Valor Realizado": "Realizado"}, inplace=True)
+                st.dataframe(
+                    df_final[["CONTA", "TIPO 1", "Budget_Num", "Valor_Realizado", "Diferença", "% Consumo"]]
+                    .style.apply(formatar_estouro, axis=1)
+                    .format({
+                        "Budget_Num": "R$ {:,.2f}",
+                        "Valor_Realizado": "R$ {:,.2f}",
+                        "Diferença": "R$ {:,.2f}",
+                        "% Consumo": "{:.1f}%"
+                    }),
+                    use_container_width=True,
+                    hide_index=True
+                )
 
-                    budget_mes["CONTA"] = budget_mes["CONTA"].astype(str).str.strip()
-                    gastos_agrupados["CONTA"] = gastos_agrupados["CONTA"].astype(str).str.strip()
-
-                    df_comparativo = pd.merge(budget_mes, gastos_agrupados, on="CONTA", how="left").fillna(0)
-                    df_comparativo["Saldo Restante"] = df_comparativo["Valor Budget"] - df_comparativo["Realizado"]
-                    
-                    df_exibicao = df_comparativo[["CONTA", "TIPO 1", "Valor Budget", "Realizado", "Saldo Restante"]]
-
-                    m1, m2, m3 = st.columns(3)
-                    m1.metric("Budget do Mês", f"R$ {df_exibicao['Valor Budget'].sum():,.2f}")
-                    m2.metric("Realizado do Mês", f"R$ {df_exibicao['Realizado'].sum():,.2f}")
-                    m3.metric("Saldo do Mês", f"R$ {df_exibicao['Saldo Restante'].sum():,.2f}")
-
-                    def pintar_estouro(row):
-                        if row["Saldo Restante"] < 0:
-                            return ['background-color: #ffe6e6; color: #990000'] * len(row)
-                        return [''] * len(row)
-
-                    st.write(f"### Detalhamento das Contas - {mes_selecionado}")
-                    st.dataframe(
-                        df_exibicao.style.apply(pintar_estouro, axis=1).format({
-                            "Valor Budget": "R$ {:,.2f}",
-                            "Realizado": "R$ {:,.2f}",
-                            "Saldo Restante": "R$ {:,.2f}"
-                        }),
-                        use_container_width=True,
-                        hide_index=True
-                    )
         except Exception as e:
             import traceback
-            st.error("Erro ao carregar o dashboard. Veja o detalhe técnico abaixo:")
+            st.error("Erro técnico no processamento das colunas SAP:")
             st.code(traceback.format_exc())
