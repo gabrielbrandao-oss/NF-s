@@ -1,5 +1,4 @@
 pandas
-streamlit-gsheets-connection
 PyDrive2
 oauth2client
 gspread
