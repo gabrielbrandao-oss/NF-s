@@ -1,4 +1,6 @@
 pandas
-st-gsheets-connection
+streamlit-gsheets-connection
 PyDrive2
 oauth2client
+gspread
+matplotlib
