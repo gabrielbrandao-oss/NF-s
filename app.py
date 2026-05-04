@@ -47,14 +47,40 @@ def upload_to_drive(file, folder_id):
     except Exception as e:
         return None
 
+# --- NOVAS FUNÇÕES: TRATAMENTO BRASILEIRO ---
 def limpeza_final(val):
-    if val is None or val == "": return 0.0
+    """Lê com precisão qualquer formato do Google Sheets e converte para número Python"""
+    if pd.isna(val) or val == "": return 0.0
     if isinstance(val, (int, float)): return float(val)
+    
     s = str(val).replace("R$", "").replace("\xa0", "").strip()
     if not s: return 0.0
-    if "." in s and "," in s: s = s.replace(".", "").replace(",", ".")
-    elif "," in s: s = s.replace(",", ".")
+    
+    # Identifica se o padrão que veio é BR ou US e trata adequadamente
+    if "." in s and "," in s:
+        if s.rfind(",") > s.rfind("."):
+            # Padrão BR: 1.234,56
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            # Padrão US: 1,234.56
+            s = s.replace(",", "")
+    elif "," in s:
+        # Padrão decimal BR: 1234,56
+        s = s.replace(",", ".")
+        
     return pd.to_numeric(s, errors='coerce') or 0.0
+
+def formatar_moeda_br(valor):
+    """Inverte o padrão americano na tela para exibir R$ 1.234,56"""
+    try:
+        if pd.isna(valor): return "R$ 0,00"
+        # Formata como US primeiro
+        txt = f"{float(valor):,.2f}"
+        # Troca a vírgula por X, o ponto por vírgula e o X por ponto
+        txt = txt.replace(",", "X").replace(".", ",").replace("X", ".")
+        return f"R$ {txt}"
+    except:
+        return "R$ 0,00"
 
 # --- APLICATIVO PRINCIPAL ---
 st.title("🚀 Hub de Controladoria e B.I.")
@@ -66,13 +92,12 @@ else:
     tab1, tab2, tab3 = st.tabs(["📥 Entrada de NF", "🛠️ B.I. Explorer", "📊 Dashboard Gerencial"])
 
     # ==========================================
-    # PROCESSAMENTO DE DADOS GLOBAL (Usado nas abas 2 e 3)
+    # PROCESSAMENTO DE DADOS GLOBAL
     # ==========================================
     try:
         client = get_google_client()
         sheet = client.open_by_url(spreadsheet_url)
         
-        # Leitura bruta
         df_lanc = pd.DataFrame(sheet.worksheet("Lancamentos").get_all_records())
         df_budget = pd.DataFrame(sheet.worksheet("Budget").get_all_records())
         
@@ -145,7 +170,6 @@ else:
         st.subheader("🛠️ Construtor de Análises")
         if not df_lanc.empty and not df_budget.empty:
             
-            # Preparando a Base Unificada para o B.I.
             df_lanc_agrupado = df_lanc.groupby(["Competência", "Conta SAP"]).agg({"Realizado": "sum"}).reset_index()
             df_lanc_agrupado.rename(columns={"Conta SAP": "CONTA"}, inplace=True)
             df_unificado = pd.merge(df_budget, df_lanc_agrupado, on=["Competência", "CONTA"], how="outer").fillna(0)
@@ -179,7 +203,12 @@ else:
             if linhas and metricas:
                 df_relatorio = df_alvo.groupby(linhas)[metricas].sum().reset_index()
                 st.markdown("### 📊 Relatório Gerado")
-                st.dataframe(df_relatorio.style.format({col: "R$ {:,.2f}" for col in metricas}), use_container_width=True, hide_index=True)
+                st.dataframe(
+                    # Aplica a nossa formatação customizada na Tabela
+                    df_relatorio.style.format({col: formatar_moeda_br for col in metricas}), 
+                    use_container_width=True, 
+                    hide_index=True
+                )
 
     # ==========================================
     # TAB 3: DASHBOARD GERENCIAL C-LEVEL
@@ -190,43 +219,39 @@ else:
         else:
             st.subheader("📈 Visão Executiva")
             
-            # Seletor Global do Dashboard
             meses_dash = sorted(df_budget["Competência"].dropna().unique().tolist())
             mes_dash_selecionado = st.selectbox("Selecione o Período para Análise:", meses_dash, index=len(meses_dash)-1 if meses_dash else 0)
             
-            # Filtragem do Período
             b_dash = df_budget[df_budget["Competência"] == mes_dash_selecionado]
             l_dash = df_lanc[df_lanc["Competência"] == mes_dash_selecionado]
             
-            # Agrupamento para KPIs
             l_dash_grp = l_dash.groupby("Conta SAP")["Realizado"].sum().reset_index()
             l_dash_grp.rename(columns={"Conta SAP": "CONTA"}, inplace=True)
             df_dash = pd.merge(b_dash, l_dash_grp, on="CONTA", how="left").fillna(0)
             
-            # Métricas Globais do Mês
             total_orcado = df_dash["Orçado"].sum()
             total_realizado = df_dash["Realizado"].sum()
             saldo_geral = total_orcado - total_realizado
             pct_consumo = (total_realizado / total_orcado * 100) if total_orcado > 0 else 0
             
-            # Linha de KPIs (Cards)
             k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Budget do Mês", f"R$ {total_orcado:,.2f}")
-            k2.metric("Consumo Realizado", f"R$ {total_realizado:,.2f}", f"{pct_consumo:.1f}% do Budget", delta_color="inverse")
-            k3.metric("Saldo Disponível", f"R$ {saldo_geral:,.2f}", "Atenção" if saldo_geral < 0 else "Saudável")
+            # Usando a formatação BR nos cartões principais
+            k1.metric("Budget do Mês", formatar_moeda_br(total_orcado))
             
-            # Barra de Progresso Visual
+            # Formatação de porcentagem (Ex: 85.5% para 85,5%)
+            pct_texto = f"{pct_consumo:.1f}%".replace(".", ",") + " do Budget"
+            k2.metric("Consumo Realizado", formatar_moeda_br(total_realizado), pct_texto, delta_color="inverse")
+            
+            k3.metric("Saldo Disponível", formatar_moeda_br(saldo_geral), "Atenção" if saldo_geral < 0 else "Saudável")
+            
             st.progress(min(pct_consumo / 100, 1.0))
-            
             st.markdown("---")
             
-            # Gráficos Lado a Lado
             cg1, cg2 = st.columns(2)
             
             with cg1:
                 st.markdown("##### 🚨 Top 5 Contas com Maior Consumo")
                 df_top_contas = df_dash.sort_values(by="Realizado", ascending=False).head(5)
-                # Prepara df para grafico de barras comparativo nativo do Streamlit
                 chart_data = df_top_contas.set_index("TIPO 1" if "TIPO 1" in df_top_contas else "CONTA")[["Orçado", "Realizado"]]
                 st.bar_chart(chart_data)
                 
@@ -243,11 +268,12 @@ else:
             df_dash["% Executado"] = (df_dash["Realizado"] / df_dash["Orçado"] * 100).replace([float('inf'), -float('inf')], 0).fillna(0)
             df_dash["Status"] = df_dash["% Executado"].apply(lambda x: "🔴 Estourado" if x > 100 else ("🟡 Alerta" if x > 85 else "🟢 OK"))
             
+            # Ajuste de exibição visual com formato brasileiro nas tabelas
             st.dataframe(
                 df_dash[["CONTA", "TIPO 1", "Orçado", "Realizado", "Status", "% Executado"]].style.format({
-                    "Orçado": "R$ {:,.2f}",
-                    "Realizado": "R$ {:,.2f}",
-                    "% Executado": "{:.1f}%"
+                    "Orçado": formatar_moeda_br,
+                    "Realizado": formatar_moeda_br,
+                    "% Executado": lambda x: f"{x:.1f}%".replace(".", ",")
                 }),
                 use_container_width=True,
                 hide_index=True
