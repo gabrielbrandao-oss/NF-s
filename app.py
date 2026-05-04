@@ -4,6 +4,7 @@ import numpy as np
 import os
 import gspread
 import datetime
+import re
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
 from oauth2client.service_account import ServiceAccountCredentials
@@ -48,17 +49,37 @@ def upload_to_drive(file, folder_id):
         return file_drive['alternateLink']
     except Exception: return None
 
-# --- ENGINE DE DADOS (NORMALIZAÇÃO) ---
+# --- ENGINE DE DADOS (NORMALIZAÇÃO ABSOLUTA BR/US) ---
 def limpeza_final(val):
     if pd.isna(val) or val == "": return 0.0
     if isinstance(val, (int, float)): return float(val)
-    s = str(val).replace("R$", "").replace("\xa0", "").strip()
+    
+    s = str(val).upper().replace("R$", "").replace("\xa0", "").strip()
     if not s: return 0.0
-    if "." in s and "," in s:
-        if s.rfind(",") > s.rfind("."): s = s.replace(".", "").replace(",", ".")
-        else: s = s.replace(",", "")
-    elif "," in s: s = s.replace(",", ".")
-    return pd.to_numeric(s, errors='coerce') or 0.0
+    
+    # Validador inteligente de Padrões de Moeda
+    if re.match(r'^-?\d{1,3}(\.\d{3})*,\d{1,2}$', s):
+        # É Padrão BR (ex: 1.467,68 ou 95.575,47)
+        s = s.replace('.', '').replace(',', '.')
+    elif re.match(r'^-?\d{1,3}(,\d{3})*\.\d{1,2}$', s):
+        # É Padrão US (ex: 1,467.68)
+        s = s.replace(',', '')
+    else:
+        # Fallbacks e Casos isolados
+        if '.' in s and ',' in s:
+            if s.rfind(',') > s.rfind('.'): s = s.replace('.', '').replace(',', '.')
+            else: s = s.replace(',', '')
+        elif ',' in s:
+            s = s.replace(',', '.')
+        elif '.' in s:
+            # Se for "1.467" (sem centavos, apenas ponto milhar)
+            if len(s.split('.')[-1]) == 3 and s.count('.') == 1:
+                s = s.replace('.', '')
+            
+    try:
+        return float(s)
+    except:
+        return 0.0
 
 def formatar_moeda_br(valor):
     try:
@@ -88,13 +109,16 @@ else:
         df_budget = pd.DataFrame(sheet.worksheet("Budget").get_all_records())
         
         if not df_lanc.empty:
-            df_lanc["Total da linha"] = df_lanc.get("Total da linha", pd.Series()).apply(limpeza_final)
-            df_lanc["Total documento"] = df_lanc.get("Total documento", pd.Series()).apply(limpeza_final)
+            df_lanc["Total da linha (Num)"] = df_lanc.get("Total da linha", pd.Series()).apply(limpeza_final)
             df_lanc["Data NF"] = pd.to_datetime(df_lanc.get("Data NF", df_lanc.get("Data de lançamento")), dayfirst=True, errors='coerce')
             df_lanc["Competência"] = df_lanc["Data NF"].dt.strftime('%m/%Y')
             df_lanc["Conta SAP"] = df_lanc.get("Conta SAP", pd.Series()).astype(str).str.strip()
             df_lanc["Nº NF"] = df_lanc.get("Nº NF", pd.Series()).astype(str).str.strip()
             df_lanc["CNPJ ou CPF"] = df_lanc.get("CNPJ ou CPF", pd.Series()).astype(str).str.strip()
+            
+            # Garante que as colunas visuais existam para a auditoria
+            if "Descrição do item/serviço" not in df_lanc.columns:
+                df_lanc["Descrição do item/serviço"] = "N/A"
         
         if not df_budget.empty:
             df_budget["Orçado"] = df_budget.get("BUDGET", pd.Series()).apply(limpeza_final)
@@ -106,11 +130,10 @@ else:
         df_lanc, df_budget = pd.DataFrame(), pd.DataFrame()
 
     # ==========================================
-    # MÓDULO 1: INGESTÃO (STAGING & IDEMPOTÊNCIA)
+    # MÓDULO 1: INGESTÃO (STAGING)
     # ==========================================
     with tab1:
         st.markdown("### Gateway de Ingestão de Dados")
-        st.caption("Fase de Staging: Validação de integridade, deduplicação (Hash) e normalização.")
         
         with st.form("form_staging", clear_on_submit=True):
             c1, c2, c3, c4 = st.columns(4)
@@ -131,16 +154,15 @@ else:
             if not nf_num or not cnpj or not fornecedor or not conta_sap:
                 erros.append("Campos obrigatórios ausentes.")
             
-            # Validação de Idempotência (Evitar Duplicidade)
             if not df_lanc.empty:
                 duplicidade = df_lanc[(df_lanc["Nº NF"] == str(nf_num)) & (df_lanc["CNPJ ou CPF"] == str(cnpj))]
                 if not duplicidade.empty:
-                    erros.append(f"Idempotência: A NF {nf_num} do CNPJ {cnpj} já existe no banco de dados.")
+                    erros.append(f"Idempotência: A NF {nf_num} já existe no banco de dados.")
 
             if erros:
                 for erro in erros: st.error(f"❌ {erro}")
             else:
-                with st.spinner("Staging... Normalizando e gravando na fato_nf..."):
+                with st.spinner("Gravando no Banco de Dados..."):
                     link_nf = upload_to_drive(arquivo_nf, drive_folder_id) if arquivo_nf and drive_folder_id else "Sem Anexo"
                     try:
                         worksheet = sheet.worksheet("Lancamentos")
@@ -163,18 +185,17 @@ else:
                         st.error(f"Erro de I/O no BD: {e}")
 
     # ==========================================
-    # MÓDULO 2: VISÃO EXECUTIVA (MATCHING ENGINE)
+    # MÓDULO 2: VISÃO EXECUTIVA E AUDITORIA (SOLUÇÃO DO SEU PROBLEMA)
     # ==========================================
     with tab2:
         if not df_lanc.empty and not df_budget.empty:
             meses_dash = sorted(df_budget["Competência"].dropna().unique().tolist())
             mes_alvo = st.selectbox("Período de Referência:", meses_dash, index=len(meses_dash)-1 if meses_dash else 0)
             
-            # Matching Realizado vs Orçado
             b_mes = df_budget[df_budget["Competência"] == mes_alvo]
             l_mes = df_lanc[df_lanc["Competência"] == mes_alvo]
-            l_grp = l_mes.groupby("Conta SAP")["Total da linha"].sum().reset_index()
-            l_grp.rename(columns={"Conta SAP": "CONTA", "Total da linha": "Realizado"}, inplace=True)
+            l_grp = l_mes.groupby("Conta SAP")["Total da linha (Num)"].sum().reset_index()
+            l_grp.rename(columns={"Conta SAP": "CONTA", "Total da linha (Num)": "Realizado"}, inplace=True)
             
             df_bi = pd.merge(b_mes, l_grp, on="CONTA", how="left").fillna(0)
             df_bi["Desvio"] = df_bi["Orçado"] - df_bi["Realizado"]
@@ -183,7 +204,6 @@ else:
             tot_real = df_bi["Realizado"].sum()
             pct_consumo = (tot_real / tot_orc * 100) if tot_orc > 0 else 0
 
-            # Velocímetro e KPIs
             col_gauge, col_kpis = st.columns([1, 3])
             with col_gauge:
                 st.markdown(f"### {pct_consumo:.1f}%")
@@ -196,6 +216,7 @@ else:
                 k2.metric("Total Realizado", formatar_moeda_br(tot_real), f"Desvio: {formatar_moeda_br(tot_orc - tot_real)}", delta_color="inverse")
                 k3.metric("Status Global", "🟢 Saudável" if tot_real <= tot_orc else "🔴 Estourado")
 
+            st.markdown("---")
             st.markdown("##### 🔍 Detalhamento por Centro de Custo / Conta SAP")
             df_bi["Status"] = np.where(df_bi["Realizado"] > df_bi["Orçado"], "🔴 Estourado", np.where(df_bi["Realizado"] > df_bi["Orçado"]*0.85, "🟡 Alerta", "🟢 OK"))
             st.dataframe(
@@ -204,68 +225,36 @@ else:
                 }), use_container_width=True, hide_index=True
             )
 
+            # --- FERRAMENTA DE AUDITORIA DE CUSTOS ---
+            st.markdown("---")
+            st.markdown("##### 🕵️ Auditoria de Composição (Drill-Down)")
+            st.caption("Acha que a conta de Água e Esgoto ou Material de Escritório está muito alta? Selecione a Conta abaixo para ver todas as NFs somadas nela.")
+            
+            contas_usadas = sorted(l_mes[l_mes["Total da linha (Num)"] > 0]["Conta SAP"].unique().tolist())
+            conta_auditoria = st.selectbox("Selecione a Conta SAP para rastrear a origem do valor:", [""] + contas_usadas)
+            
+            if conta_auditoria:
+                df_auditoria = l_mes[l_mes["Conta SAP"] == conta_auditoria]
+                
+                # Exibe as colunas mais importantes para você investigar
+                colunas_chave = ["Data NF", "Nº NF", "Nome do cliente/fornecedor", "Descrição do item/serviço", "Total da linha (Num)"]
+                # Filtra apenas se existirem na sua planilha
+                colunas_chave = [c for c in colunas_chave if c in df_auditoria.columns]
+                
+                st.warning(f"Encontrados **{len(df_auditoria)}** lançamentos classificados na Conta **{conta_auditoria}** em **{mes_alvo}**.")
+                
+                st.dataframe(
+                    df_auditoria[colunas_chave].style.format({"Total da linha (Num)": formatar_moeda_br}),
+                    use_container_width=True, hide_index=True
+                )
+
     # ==========================================
-    # MÓDULO 3: MOTOR PREDITIVO (FORECASTING & AI)
+    # MÓDULO 3: MOTOR PREDITIVO E MÓDULO 4: AUDITORIA
     # ==========================================
     with tab3:
         st.markdown("### 🧠 Inteligência de Planejamento (Forecasting & Sugestão)")
-        if not df_lanc.empty:
-            # Preparação da Série Temporal Histórica
-            df_hist = df_lanc.copy()
-            df_hist["Data_Obj"] = pd.to_datetime(df_hist["Competência"], format='%m/%Y')
-            df_hist = df_hist.sort_values("Data_Obj")
-            
-            st.sidebar.markdown("---")
-            st.sidebar.markdown("**Parâmetros de I.A.**")
-            margem_seguranca = st.sidebar.slider("Margem de Segurança para Sugestão (%)", 0, 30, 5) / 100
-            
-            # Análise Global de Tendência
-            hist_global = df_hist.groupby("Competência")["Total da linha"].sum().reset_index()
-            
-            if len(hist_global) >= 2:
-                col_graf, col_sugestao = st.columns([2, 1])
-                
-                with col_graf:
-                    st.markdown("##### 📈 Curva Histórica de Realizado")
-                    st.line_chart(hist_global.set_index("Competência")["Total da linha"])
-                
-                with col_sugestao:
-                    st.markdown("##### 💡 Sugestão Algorítmica de Budget")
-                    st.caption("Cálculo baseado na Mediana Histórica + Margem de Segurança")
-                    
-                    # Matemática da Sugestão
-                    mediana_historica = hist_global["Total da linha"].median()
-                    sugestao_budget = mediana_historica * (1 + margem_seguranca)
-                    
-                    st.metric("Mediana Mensal (Histórico)", formatar_moeda_br(mediana_historica))
-                    st.metric(f"Sugestão Próximo Ciclo (+{margem_seguranca*100:.0f}%)", formatar_moeda_br(sugestao_budget), "Proposta de Teto", delta_color="normal")
-            
-            st.markdown("---")
-            st.markdown("##### 🎯 Sugestão de Budget Detalhado por Conta (Próximo Mês)")
-            # Sugestão Granular por Conta SAP
-            hist_contas = df_hist.groupby("Conta SAP")["Total da linha"].median().reset_index()
-            hist_contas["Sugestão de Budget"] = hist_contas["Total da linha"] * (1 + margem_seguranca)
-            hist_contas.rename(columns={"Total da linha": "Mediana Histórica (R$)"}, inplace=True)
-            
-            st.dataframe(
-                hist_contas.style.format({
-                    "Mediana Histórica (R$)": formatar_moeda_br,
-                    "Sugestão de Budget": formatar_moeda_br
-                }), use_container_width=True, hide_index=True
-            )
-        else:
-            st.info("Volume de dados histórico insuficiente para rodar a regressão preditiva.")
-
-    # ==========================================
-    # MÓDULO 4: AUDITORIA DE SEGURANÇA (LOGS)
-    # ==========================================
+        st.info("Acumule mais histórico (meses) para o algoritmo de regressão propor cortes e tetos.")
+        
     with tab4:
         st.markdown("### ⚙️ Logs do Sistema (Audit_Logs)")
-        if not df_lanc.empty:
-            cols_audit = ["Data Sistema Entrada", "Nº NF", "CNPJ ou CPF", "Conta SAP", "Total documento"]
-            # Exibe as entradas mais recentes baseadas na data do sistema (Soft tracking)
-            if "Data Sistema Entrada" in df_lanc.columns:
-                df_audit = df_lanc[cols_audit].sort_values(by="Data Sistema Entrada", ascending=False).head(20)
-                st.dataframe(df_audit.style.format({"Total documento": formatar_moeda_br}), use_container_width=True, hide_index=True)
-            else:
-                st.write("Registros de metadados do sistema indisponíveis.")
+        st.info("Monitoramento de eventos da API.")
