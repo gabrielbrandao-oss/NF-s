@@ -4,7 +4,6 @@ import numpy as np
 import os
 import gspread
 import datetime
-import re
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
 from oauth2client.service_account import ServiceAccountCredentials
@@ -49,32 +48,45 @@ def upload_to_drive(file, folder_id):
         return file_drive['alternateLink']
     except Exception: return None
 
-# --- ENGINE DE DADOS (NORMALIZAÇÃO ABSOLUTA BR/US) ---
+# --- ENGINE DE DADOS (NORMALIZAÇÃO ABSOLUTA E INTELIGENTE BR/US) ---
 def limpeza_final(val):
     if pd.isna(val) or val == "": return 0.0
     if isinstance(val, (int, float)): return float(val)
     
-    s = str(val).upper().replace("R$", "").replace("\xa0", "").strip()
+    # 1. Remove R$, espaços e caracteres invisíveis. Mantém apenas números, pontos e vírgulas.
+    s = str(val).upper().replace("R$", "").strip()
+    s = ''.join(c for c in s if c.isdigit() or c in '.,-')
+    
     if not s: return 0.0
     
-    # Validador inteligente de Padrões de Moeda
-    if re.match(r'^-?\d{1,3}(\.\d{3})*,\d{1,2}$', s):
-        # É Padrão BR (ex: 1.467,68 ou 95.575,47)
+    # 2. Contagem para identificação do padrão (BR x US)
+    qtd_pontos = s.count('.')
+    qtd_virgulas = s.count(',')
+    
+    if qtd_pontos == 0 and qtd_virgulas == 0:
+        pass # Apenas números inteiros
+    elif qtd_pontos == 1 and qtd_virgulas == 1:
+        # Padrão misto (ex: 1.467,68 ou 1,467.68)
+        if s.rfind(',') > s.rfind('.'):
+            s = s.replace('.', '').replace(',', '.') # É Padrão BR
+        else:
+            s = s.replace(',', '') # É Padrão US
+    elif qtd_pontos > 1 and qtd_virgulas <= 1:
+        # BR longo (ex: 1.000.000,00)
         s = s.replace('.', '').replace(',', '.')
-    elif re.match(r'^-?\d{1,3}(,\d{3})*\.\d{1,2}$', s):
-        # É Padrão US (ex: 1,467.68)
+    elif qtd_virgulas > 1 and qtd_pontos <= 1:
+        # US longo (ex: 1,000,000.00)
         s = s.replace(',', '')
-    else:
-        # Fallbacks e Casos isolados
-        if '.' in s and ',' in s:
-            if s.rfind(',') > s.rfind('.'): s = s.replace('.', '').replace(',', '.')
-            else: s = s.replace(',', '')
-        elif ',' in s:
-            s = s.replace(',', '.')
-        elif '.' in s:
-            # Se for "1.467" (sem centavos, apenas ponto milhar)
-            if len(s.split('.')[-1]) == 3 and s.count('.') == 1:
-                s = s.replace('.', '')
+    elif qtd_pontos == 1 and qtd_virgulas == 0:
+        # Pode ser US sem milhar (163.96) ou BR milhar sem centavos (1.467)
+        if len(s.split('.')[-1]) == 3:
+            s = s.replace('.', '') # Era milhar BR
+    elif qtd_virgulas == 1 and qtd_pontos == 0:
+        # Pode ser BR sem milhar (163,96) ou US milhar sem centavos (1,467)
+        if len(s.split(',')[-1]) == 3:
+            s = s.replace(',', '') # Era milhar US
+        else:
+            s = s.replace(',', '.') # Era decimal BR
             
     try:
         return float(s)
@@ -92,7 +104,6 @@ def formatar_moeda_br(valor):
 if not spreadsheet_url:
     st.info("Conecte o Data Lake (URL da Planilha) para inicializar o SGGAG.")
 else:
-    # Módulos do Sistema
     tab1, tab2, tab3, tab4 = st.tabs([
         "📥 1. Ingestão & Staging", 
         "📊 2. Visão Executiva (Matching)", 
@@ -116,7 +127,6 @@ else:
             df_lanc["Nº NF"] = df_lanc.get("Nº NF", pd.Series()).astype(str).str.strip()
             df_lanc["CNPJ ou CPF"] = df_lanc.get("CNPJ ou CPF", pd.Series()).astype(str).str.strip()
             
-            # Garante que as colunas visuais existam para a auditoria
             if "Descrição do item/serviço" not in df_lanc.columns:
                 df_lanc["Descrição do item/serviço"] = "N/A"
         
@@ -185,7 +195,7 @@ else:
                         st.error(f"Erro de I/O no BD: {e}")
 
     # ==========================================
-    # MÓDULO 2: VISÃO EXECUTIVA E AUDITORIA (SOLUÇÃO DO SEU PROBLEMA)
+    # MÓDULO 2: VISÃO EXECUTIVA E AUDITORIA
     # ==========================================
     with tab2:
         if not df_lanc.empty and not df_budget.empty:
@@ -228,7 +238,7 @@ else:
             # --- FERRAMENTA DE AUDITORIA DE CUSTOS ---
             st.markdown("---")
             st.markdown("##### 🕵️ Auditoria de Composição (Drill-Down)")
-            st.caption("Acha que a conta de Água e Esgoto ou Material de Escritório está muito alta? Selecione a Conta abaixo para ver todas as NFs somadas nela.")
+            st.caption("Selecione a Conta abaixo para ver todas as NFs que compõem o valor gerencial.")
             
             contas_usadas = sorted(l_mes[l_mes["Total da linha (Num)"] > 0]["Conta SAP"].unique().tolist())
             conta_auditoria = st.selectbox("Selecione a Conta SAP para rastrear a origem do valor:", [""] + contas_usadas)
@@ -236,9 +246,7 @@ else:
             if conta_auditoria:
                 df_auditoria = l_mes[l_mes["Conta SAP"] == conta_auditoria]
                 
-                # Exibe as colunas mais importantes para você investigar
                 colunas_chave = ["Data NF", "Nº NF", "Nome do cliente/fornecedor", "Descrição do item/serviço", "Total da linha (Num)"]
-                # Filtra apenas se existirem na sua planilha
                 colunas_chave = [c for c in colunas_chave if c in df_auditoria.columns]
                 
                 st.warning(f"Encontrados **{len(df_auditoria)}** lançamentos classificados na Conta **{conta_auditoria}** em **{mes_alvo}**.")
@@ -249,12 +257,15 @@ else:
                 )
 
     # ==========================================
-    # MÓDULO 3: MOTOR PREDITIVO E MÓDULO 4: AUDITORIA
+    # MÓDULO 3: MOTOR PREDITIVO
     # ==========================================
     with tab3:
         st.markdown("### 🧠 Inteligência de Planejamento (Forecasting & Sugestão)")
         st.info("Acumule mais histórico (meses) para o algoritmo de regressão propor cortes e tetos.")
         
+    # ==========================================
+    # MÓDULO 4: AUDITORIA DE LOGS
+    # ==========================================
     with tab4:
         st.markdown("### ⚙️ Logs do Sistema (Audit_Logs)")
         st.info("Monitoramento de eventos da API.")
