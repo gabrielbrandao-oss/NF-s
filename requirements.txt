@@ -1,3 +1,4 @@
+streamlit
 pandas
 PyDrive2
 oauth2client
