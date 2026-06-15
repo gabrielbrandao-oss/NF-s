@@ -145,10 +145,37 @@ def title_l(txt):
 
 # ─── AUTH ─────────────────────────────────────────────────────────────────────
 def check_auth():
-    pwd=st.secrets.get("senha_app","") or st.secrets.get("senha_app_hash","")
+    # Busca senha — try/except porque st.secrets lança KeyError se a chave não existe
+    pwd = ""
+    for key in ["senha_app", "senha_app_hash", "SENHA_APP", "password"]:
+        try:
+            val = st.secrets[key]
+            if val:
+                pwd = str(val).strip()
+                break
+        except (KeyError, Exception):
+            continue
+
+    # Se não houver senha configurada, mostra instrução clara e para
     if not pwd:
-        st.error("Configure `senha_app` no secrets.toml"); st.stop()
+        st.markdown("""
+        <div style='max-width:520px;margin:80px auto;background:#161b22;
+                    border:1px solid #e85454;border-radius:12px;padding:28px 32px;'>
+          <div style='font-size:1rem;font-weight:700;color:#e85454;margin-bottom:12px;'>
+            ⚠️ Senha não configurada</div>
+          <div style='font-size:.85rem;color:#c9d1d9;line-height:1.7;'>
+            Adicione a senha no painel de Secrets do Streamlit Cloud:<br><br>
+            <code style='background:#0d1117;padding:10px 14px;border-radius:6px;
+                         display:block;font-size:.82rem;color:#1da462;'>
+              senha_app = "sua_senha_aqui"
+            </code><br>
+            <b>Como acessar:</b> App → ⋮ (menu) → Settings → Secrets
+          </div>
+        </div>""", unsafe_allow_html=True)
+        st.stop()
+
     if st.session_state.get("_ok"): return
+
     _,col,_=st.columns([1,1.1,1])
     with col:
         st.markdown("<br><br>",unsafe_allow_html=True)
@@ -161,9 +188,11 @@ def check_auth():
         s=st.text_input("Senha",type="password",placeholder="Digite a senha")
         if st.button("Entrar",use_container_width=True):
             ok=False
+            # Suporte a hash bcrypt ($2b$...) e texto plano
             if pwd.startswith("$2"):
                 try:
-                    import bcrypt; ok=bcrypt.checkpw(s.encode(),pwd.encode())
+                    import bcrypt
+                    ok=bcrypt.checkpw(s.encode("utf-8"),pwd.encode("utf-8"))
                 except: pass
             if not ok: ok=(s==pwd)
             if ok: st.session_state["_ok"]=True; st.rerun()
