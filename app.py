@@ -202,18 +202,38 @@ def load_lancamentos(_cli, url):
     data = ws.get_all_values()
     if len(data) < 2: return pd.DataFrame()
 
+    # Contas de RH excluídas do dashboard (apenas custos operacionais/Facilities)
+    CONTAS_RH = {
+        "salários a pagar", "inss a recolher", "irrf s/folha pagamento",
+        "fgts a pagar", "férias a pagar", "rescisão a pagar",
+        "bolsa estágio a pagar", "ppr a pagar", "contribuição assistencial a pagar",
+        "despesas de departamento de pessoal", "assistência médica e odontológica",
+        "transportes e vale transporte", "bem estar", "seguro de vida e saúde",
+        "refeição/alimentação",
+    }
+    # Prefixos de contas RH (para pegar variações com código de fornecedor no nome)
+    PREFIXOS_RH = (
+        "salários a pagar", "férias a pagar", "rescisão a pagar",
+        "bolsa estágio a pagar", "ppr a pagar",
+    )
+
     records = []
     for r in data[1:]:
         def g(i): return r[i].strip() if i < len(r) else ""
         val = parse_num(g(11))   # col 12 (idx 11)
         if val == 0: continue
+        nome_conta = g(33).strip()  # col 34 — nome da conta
+        # Excluir contas de RH
+        nc_lower = nome_conta.lower()
+        if nc_lower in CONTAS_RH: continue
+        if any(nc_lower.startswith(p) for p in PREFIXOS_RH): continue
         records.append({
             "_data":    g(5),    # col 6  — Data NF
             "Fornecedor": g(7),  # col 8
             "Valor":    val,
             "CC":       g(15),   # col 16 — Centro de Custos
             "ContaSAP": g(32),   # col 33 — código SAP
-            "Conta":    g(33),   # col 34 — nome da conta
+            "Conta":    nome_conta,
             "CNPJ":     g(26),   # col 27
             "Descricao":g(10),   # col 11 — Descrição do item
             "NF":       g(1),    # col 2  — Nº NF
@@ -243,15 +263,33 @@ def load_budget(_cli, url):
     data = ws.get_all_values()
     if len(data) < 2: return pd.DataFrame()
 
+    # Mesmas contas de RH excluídas dos lançamentos
+    CONTAS_RH_BUD = {
+        "salários a pagar", "inss a recolher", "irrf s/folha pagamento",
+        "fgts a pagar", "férias a pagar", "rescisão a pagar",
+        "bolsa estágio a pagar", "ppr a pagar", "contribuição assistencial a pagar",
+        "despesas de departamento de pessoal", "assistência médica e odontológica",
+        "transportes e vale transporte", "bem estar", "seguro de vida e saúde",
+        "refeição/alimentação",
+    }
+    PREFIXOS_RH_BUD = (
+        "salários a pagar", "férias a pagar", "rescisão a pagar",
+        "bolsa estágio a pagar", "ppr a pagar",
+    )
+
     records = []
     for r in data[1:]:
         def g(i): return r[i].strip() if i < len(r) else ""
         bud = parse_num(g(3))   # col 4
         if not g(0): continue
+        nome_conta = g(2).strip()
+        nc_lower   = nome_conta.lower()
+        if nc_lower in CONTAS_RH_BUD: continue
+        if any(nc_lower.startswith(p) for p in PREFIXOS_RH_BUD): continue
         records.append({
             "_mes":  g(0),
             "ContaSAP": g(1),   # col 2 — código
-            "Conta": g(2),      # col 3 — nome
+            "Conta": nome_conta,
             "Budget": bud,
         })
 
