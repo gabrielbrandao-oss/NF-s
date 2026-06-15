@@ -11,7 +11,8 @@ import json
 from oauth2client.service_account import ServiceAccountCredentials
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import anthropic, logging
+import google.generativeai as genai
+import logging
 
 logging.basicConfig(level=logging.INFO)
 
@@ -296,20 +297,26 @@ def construir_contexto(df_l, df_b, df_bi, filtros):
     return ctx
 
 def chamar_ia(ctx, pergunta, historico):
-    api_key=""
-    for k in ["anthropic_api_key","ANTHROPIC_API_KEY"]:
+    # Busca chave Gemini no secrets (nunca no código)
+    api_key = ""
+    for k in ["gemini_api_key", "GEMINI_API_KEY", "google_api_key", "GOOGLE_API_KEY"]:
         try:
-            v=st.secrets[k]
-            if v: api_key=str(v).strip(); break
+            v = st.secrets[k]
+            if v: api_key = str(v).strip(); break
         except: continue
 
     if not api_key:
-        return ("⚠️ Configure `anthropic_api_key` no secrets.toml para usar a análise IA.\n\n"
-                "No Streamlit Cloud: App → ⋮ → Settings → Secrets\n"
-                "```\nanthropic_api_key = \"sk-ant-...\"\n```")
+        return (
+            "⚠️ Configure a chave Gemini no secrets do Streamlit Cloud:\n\n"
+            "App → ⋮ (menu) → Settings → Secrets\n\n"
+            "```toml\n"
+            "gemini_api_key = \"AIza...\"\n"
+            "```\n\n"
+            "Obtenha sua chave gratuita em: https://aistudio.google.com/apikey"
+        )
 
-    system = (
-        "Você é um analista financeiro sênior especializado em gestão de custos de Facilities da Cobli.\n"
+    system_prompt = (
+        "Você é um analista financeiro sênior especializado em gestão de custos de Facilities da Cobli. "
         "Seu objetivo é identificar oportunidades de redução de gastos, anomalias e gerar insights "
         "acionáveis para o CFO.\n\n"
         "Regras:\n"
@@ -318,18 +325,27 @@ def chamar_ia(ctx, pergunta, historico):
         "3. Use linguagem executiva, direta e objetiva\n"
         "4. Formate valores em R$ com separadores brasileiros\n"
         "5. Responda sempre em português do Brasil\n\n"
-        "Dados do período analisado:\n" + json.dumps(ctx, ensure_ascii=False, default=str)
+        "Dados do período analisado:\n"
+        + json.dumps(ctx, ensure_ascii=False, default=str)
     )
-    msgs=[{"role":h["role"],"content":h["content"]} for h in historico]
-    msgs.append({"role":"user","content":pergunta})
+
     try:
-        client=anthropic.Anthropic(api_key=api_key)
-        resp=client.messages.create(
-            model="claude-sonnet-4-6", max_tokens=1500,
-            system=system, messages=msgs)
-        return resp.content[0].text
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(
+            model_name="gemini-2.0-flash",
+            system_instruction=system_prompt,
+        )
+        # Monta histórico no formato Gemini
+        history = []
+        for h in historico:
+            role = "user" if h["role"] == "user" else "model"
+            history.append({"role": role, "parts": [h["content"]]})
+
+        chat = model.start_chat(history=history)
+        resp = chat.send_message(pergunta)
+        return resp.text
     except Exception as e:
-        return f"⚠️ Erro na IA: {e}"
+        return f"⚠️ Erro no Gemini: {e}"
 
 # ─── GRÁFICOS ─────────────────────────────────────────────────────────────────
 def fig_bvr(df, modo):
