@@ -1,6 +1,7 @@
 streamlit
 pandas
-PyDrive2
-oauth2client
+numpy
 gspread
-matplotlib
+oauth2client
+plotly
+anthropic
